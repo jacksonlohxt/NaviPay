@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { AdapterError, MockCheckoutAdapter, MockDiscoveryAdapter, MockFundingAdapter, MockIssuerAdapter } = require('./adapters');
+const { AdapterError, MockCheckoutAdapter, MockDiscoveryAdapter, MockFundingAdapter, MockIssuerAdapter, parsePurchaseRequest } = require('./adapters');
 
 const TASK_CEILING_MINOR = 100000;
 const CURRENCY = 'XSGD';
@@ -100,7 +100,9 @@ function validateFundingEvidence(evidence, currency) {
 }
 
 function validateCandidate(candidate, currency) {
-  return candidate && isText(candidate.id) && isText(candidate.merchant) && isText(candidate.merchantDomain) && isText(candidate.item) && isText(candidate.variant) && isMinor(candidate.subtotalMinor) && isMinor(candidate.shippingMinor) && isMinor(candidate.taxMinor) && isMinor(candidate.totalMinor) && candidate.totalMinor === candidate.subtotalMinor + candidate.shippingMinor + candidate.taxMinor && candidate.currency === currency && isTimestamp(candidate.expiresAt);
+  const availability = new Set(['in_stock', 'limited', 'out_of_stock']);
+  const evidence = candidate?.evidence;
+  return candidate && isText(candidate.id) && isText(candidate.brand) && isText(candidate.productCategory) && isText(candidate.merchant) && isText(candidate.merchantDomain) && isText(candidate.item) && isText(candidate.variant) && isMinor(candidate.subtotalMinor) && isMinor(candidate.shippingMinor) && isMinor(candidate.taxMinor) && isMinor(candidate.totalMinor) && candidate.totalMinor === candidate.subtotalMinor + candidate.shippingMinor + candidate.taxMinor && candidate.currency === currency && availability.has(candidate.availability) && Number.isFinite(candidate.relevanceScore) && Array.isArray(candidate.matchReasons) && candidate.matchReasons.length > 0 && isText(candidate.selectionReason) && evidence && isText(evidence.type) && isText(evidence.source) && isText(evidence.catalogId) && isTimestamp(evidence.observedAt) && isText(evidence.note) && isTimestamp(candidate.expiresAt);
 }
 
 function validateDiscoveryResult(result, currency) {
@@ -177,18 +179,32 @@ class NaviPayService {
     this.checkoutAdapter = checkoutAdapter;
   }
 
-  createTask({ scenario = 'happy', origin = 'operator', merchant, item, amount, amountMinor, replayOf } = {}) {
+  createTask({ scenario = 'happy', origin = 'operator', merchant, item, amount, amountMinor, request, replayOf } = {}) {
     if (!SCENARIOS.has(scenario)) {
       throw new DomainError(400, 'INVALID_SCENARIO', `Unknown demo scenario: ${scenario}.`);
     }
     const hasPurchaseInput = [merchant, item, amount, amountMinor].some((value) => value !== undefined);
-    const purchase = hasPurchaseInput
-      ? validatePurchaseInput({ merchant, item, amount, amountMinor })
-      : {
-        ...DEFAULT_PURCHASE,
-        amountMinor: scenario === 'over-cap' ? 125000 : DEFAULT_PURCHASE.amountMinor,
-        currency: CURRENCY
-      };
+    if (request !== undefined && hasPurchaseInput) {
+      throw new DomainError(422, 'REQUEST_INPUT_CONFLICT', 'Provide either a natural purchase request or direct merchant, item, and amount fields.');
+    }
+    let purchase = null;
+    let purchaseRequest = null;
+    if (request !== undefined) {
+      try {
+        const intent = parsePurchaseRequest(request);
+        purchaseRequest = { raw: request.trim(), intent };
+      } catch (error) {
+        throw new DomainError(422, error.code || 'INVALID_PURCHASE_REQUEST', error.message || 'Purchase request is invalid.');
+      }
+    } else {
+      purchase = hasPurchaseInput
+        ? validatePurchaseInput({ merchant, item, amount, amountMinor })
+        : {
+          ...DEFAULT_PURCHASE,
+          amountMinor: scenario === 'over-cap' ? 125000 : DEFAULT_PURCHASE.amountMinor,
+          currency: CURRENCY
+        };
+    }
     const createdClock = this.clock();
     const latestCreatedAt = Object.values(this.store.data.tasks)
       .map((existing) => Date.parse(existing.createdAt))
@@ -205,6 +221,7 @@ class NaviPayService {
       mode: 'demo / mock',
       currency: CURRENCY,
       spendingCeilingMinor: TASK_CEILING_MINOR,
+      request: purchaseRequest,
       purchase,
       state: 'created',
       entryOpened: false,
@@ -218,13 +235,19 @@ class NaviPayService {
     };
     this.store.transaction((data) => {
       data.tasks[task.id] = task;
-      appendAudit(data, task.id, this.clock, 'task.created', 'info', 'Assigned purchase task created.', {
+      const taskDetails = {
         mode: task.mode,
-        merchant: task.purchase.merchant,
-        item: task.purchase.item,
-        amount: money(task.purchase.amountMinor, task.purchase.currency),
         spendingCeiling: money(task.spendingCeilingMinor)
-      });
+      };
+      if (task.request) {
+        taskDetails.request = task.request.raw;
+        taskDetails.intent = task.request.intent;
+      } else {
+        taskDetails.merchant = task.purchase.merchant;
+        taskDetails.item = task.purchase.item;
+        taskDetails.amount = money(task.purchase.amountMinor, task.purchase.currency);
+      }
+      appendAudit(data, task.id, this.clock, 'task.created', 'info', 'Assigned purchase task created.', taskDetails);
     });
     return publicTask(task);
   }
@@ -265,22 +288,26 @@ class NaviPayService {
       if (!['completed', 'failed'].includes(task.state)) {
         throw new DomainError(409, 'TASK_NOT_REPLAYABLE', 'Only a completed or safely stopped task can be replayed.');
       }
-      const purchase = task.purchase || {
-        merchant: task.quote?.lockedSnapshot?.merchant,
-        item: task.quote?.lockedSnapshot?.item,
-        amountMinor: task.quote?.lockedSnapshot?.totalMinor
-      };
       const replayInput = {
         scenario: task.scenario,
         origin: 'replay',
         replayOf: task.id
       };
-      if (purchase.amountMinor <= TASK_CEILING_MINOR) {
-        Object.assign(replayInput, {
-          merchant: purchase.merchant,
-          item: purchase.item,
-          amountMinor: purchase.amountMinor
-        });
+      if (task.request) {
+        replayInput.request = task.request.raw;
+      } else {
+        const purchase = task.purchase || {
+          merchant: task.quote?.lockedSnapshot?.merchant,
+          item: task.quote?.lockedSnapshot?.item,
+          amountMinor: task.quote?.lockedSnapshot?.totalMinor
+        };
+        if (purchase.amountMinor <= TASK_CEILING_MINOR) {
+          Object.assign(replayInput, {
+            merchant: purchase.merchant,
+            item: purchase.item,
+            amountMinor: purchase.amountMinor
+          });
+        }
       }
       const replay = this.createTask(replayInput);
       return { statusCode: 201, body: { task: replay, replayOf: task.id } };
@@ -405,7 +432,7 @@ class NaviPayService {
       task.updatedAt = this.clock().toISOString();
       appendAudit(data, task.id, this.clock, 'discovery.started', 'info', 'Discovery started for the assigned item.', { mode: task.mode });
       try {
-        const result = this.discoveryAdapter.discover({ taskId, scenario: task.scenario, currency: task.currency, purchase: task.purchase });
+        const result = this.discoveryAdapter.discover({ taskId, scenario: task.scenario, currency: task.currency, purchase: task.purchase, request: task.request });
         validateDiscoveryResult(result, task.currency);
         task.quote = {
           mode: result.mode,
@@ -446,6 +473,7 @@ class NaviPayService {
         : task.quote.candidates.find((item) => item.id === task.quote.recommendedCandidateId);
       if (!candidate) throw new DomainError(422, 'QUOTE_CANDIDATE_NOT_FOUND', 'Select one of the returned quote candidates.');
       if (candidate.currency !== task.currency) throw new DomainError(422, 'QUOTE_CURRENCY_MISMATCH', 'The quote currency does not match the task currency.');
+      if (candidate.availability === 'out_of_stock') throw new DomainError(422, 'QUOTE_UNAVAILABLE', 'The selected local catalog item is not available.');
       if (new Date(candidate.expiresAt).getTime() <= this.clock().getTime()) {
         throw new DomainError(422, 'QUOTE_EXPIRED', 'The selected quote expired before it could be locked.');
       }
@@ -454,12 +482,16 @@ class NaviPayService {
       task.quote.lockedAt = this.clock().toISOString();
       task.quote.lockedSnapshot = {
         quoteId: candidate.id,
+        brand: candidate.brand,
+        productCategory: candidate.productCategory,
         merchant: candidate.merchant,
         merchantDomain: candidate.merchantDomain,
         item: candidate.item,
         variant: candidate.variant,
         totalMinor: candidate.totalMinor,
         currency: candidate.currency,
+        availability: candidate.availability,
+        evidence: candidate.evidence,
         expiresAt: candidate.expiresAt
       };
       task.updatedAt = this.clock().toISOString();

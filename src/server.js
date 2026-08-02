@@ -79,6 +79,7 @@ function routeApi(service, req, res, url) {
       const task = service.createTask({
         scenario: request.scenario === undefined ? 'happy' : request.scenario,
         origin: request.origin || 'operator',
+        request: request.request,
         merchant: request.merchant,
         item: request.item,
         amount: request.amount,

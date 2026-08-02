@@ -1,6 +1,6 @@
 # NaviPay
 
-NaviPay is a local-only, mock-first purchase control plane. It demonstrates one bounded XSGD purchase from funding evidence through a task-scoped instrument, one checkout, and a redacted audit timeline.
+NaviPay is a local-only, mock-first purchase control plane. It accepts a natural shopping request, ranks a deterministic local catalog, and demonstrates one bounded XSGD purchase from funding evidence through a task-scoped instrument, one checkout, and a redacted audit timeline.
 
 ## Run locally
 
@@ -15,13 +15,21 @@ Open <http://127.0.0.1:3000>. The app seeds a fresh happy-path task when the loc
 
 The local JSON store is written to `.data/navipay.json` with an atomic, permission-restricted replacement. Set `NAVIPAY_DATA_FILE` to use another location. **Reset local demo** is an explicit destructive control: it clears local tasks and audit history, then seeds one new happy path. A safe replay creates a separate task and preserves the original record.
 
+## Natural request discovery
+
+Enter **I want Apple earphones** in the purchase-request field. NaviPay deterministically normalizes the text into the brand `Apple`, product category `earphones`, and keywords `apple` and `earphones`. The mock discovery adapter ranks seeded examples such as Apple AirPods 4, Apple AirPods Pro 2, Sony WF-C700N, Samsung Galaxy Buds3, Soundcore Liberty 4 NC, and Bose QuietComfort Ultra Earbuds. Each candidate includes its merchant, item, variant, XSGD total, availability, relevance explanation, expiry, and local-catalog evidence.
+
+This catalog is deliberately small and local. It is not a live marketplace, does not check real inventory, and does not scrape arbitrary websites. Results carry a `DEMO / MOCK` disclosure and are only quote candidates. Selecting one locks the merchant, item, variant, total, currency, and expiry in the persisted task before policy, issuance, checkout, outcome, and audit continue through the existing backend lifecycle.
+
+The replaceable discovery boundary is `MockDiscoveryAdapter` in `src/adapters.js`. A future approved live source can implement the same adapter contract and normalize its response there, while keeping credentials inside the provider process and preserving the server-side quote lock, cap, policy, scoped instrument, idempotency, and reconciliation safeguards. The local adapter remains the default.
+
 ## Fresh-start product walkthrough
 
 1. Start with `npm start`, then open the operator workspace. The persistent task list shows the current run and prior outcomes after refresh or server restart.
-2. Enter a merchant, item, and positive XSGD amount, then choose **Create purchase task**. The client and server reject malformed amounts and anything above the immutable XSGD 1,000 ceiling. Accepted tasks are saved before lifecycle work begins.
-3. Select the new task in **Persisted runs** if needed. The task context shows the requested purchase and its status. Use **Open assigned task** to record intent, then proceed through funding, constrained discovery, quote lock, policy, issuance, and the one checkout action.
+2. Enter **I want Apple earphones**, then choose **Create request task**. The server stores the raw request and parsed intent before lifecycle work begins. The direct merchant, item, and amount path remains available under **Use the direct merchant, item, and amount path** for exact preselected purchases.
+3. Select the new task in **Persisted runs** if needed. Use **Open assigned task**, verify funding, and choose **Discover ranked candidates**. Select an AirPods result or an alternative, inspect the evidence and expiry, then lock one exact quote before continuing through policy, issuance, and the one checkout action.
 4. At funding, inspect the separate on-chain evidence and card-spendable settlement fields. The latter is a mock issuer-ledger fact and is never inferred from the chain observation.
-5. Review the exact merchant, item, amount, currency, and expiry before locking the quote. Policy enforces the ceiling before issuing a provider-controlled, one-use instrument.
+5. Review the exact merchant, item, variant, price, currency, availability, evidence, and expiry before locking the quote. Policy enforces the ceiling before issuing a provider-controlled, one-use instrument.
 6. Inspect **Redacted evidence** at any stage. It is an append-only task timeline without credentials or wallet keys. Completed and safely stopped tasks remain in history.
 7. Use **Safely replay as new task** only for a completed or safely stopped task. An unresolved unknown checkout cannot be replayed. Use **Reset local demo** only when you intentionally want to discard this local history.
 
@@ -59,12 +67,12 @@ npm test
 npm run check
 ```
 
-The focused tests cover the complete lifecycle, separated funding and settlement evidence, quote immutability, the XSGD ceiling, idempotency, all deterministic failure and reconciliation paths, scoped checkout-result validation, reset behavior, and persistent store recovery boundaries.
+The focused tests cover deterministic request parsing and catalog ranking, natural request candidate selection and quote locking, the complete lifecycle, separated funding and settlement evidence, quote immutability, the XSGD ceiling, idempotency, all deterministic failure and reconciliation paths, scoped checkout-result validation, reset behavior, and persistent store recovery boundaries.
 
 ## Architecture and extension points
 
 - `src/domain.js` owns the server-side six-stage state machine, policy checks, idempotency records, quote lock, one-use instrument invariant, reconciliation, and audit events.
-- `src/adapters.js` defines replaceable funding, discovery, issuer, and checkout contracts. The default adapters return deterministic local fixtures and never need credentials. The discovery contract receives the normalized task purchase and returns candidates; the issuer and checkout contracts receive only the locked scope.
+- `src/adapters.js` defines deterministic request parsing, local-catalog ranking, and replaceable funding, discovery, issuer, and checkout contracts. The default adapters return local fixtures and never need credentials. The discovery contract receives either a normalized natural request intent or the preserved direct task purchase and returns candidates; the issuer and checkout contracts receive only the locked scope.
 - `src/store.js` provides the single-host persistent store, atomic writes, reset behavior, and state-shape validation. No database service is required for this MVP.
 - `src/server.js` serves the JSON API and static operator console from one origin. The API is the integration boundary for a future brief.
 - `public/` contains the responsive six-stage operator experience: entry, funding, discovery and quote lock, issuance, execution, and outcome/audit.
@@ -75,4 +83,4 @@ The operator console never receives sensitive payment credentials, wallet keys, 
 
 ## Deliberate MVP boundary
 
-This slice does not include social login, consumer wallet features, generalized shopping, multi-task queues, policy editing, production custody, production KYC, or live provider integrations. Live adapters can be added behind the contracts without changing the domain lifecycle.
+This slice does not include social login, consumer wallet features, a generic marketplace, reviews, subscriptions, generalized shopping, multi-task queues, policy editing, production custody, production KYC, or live provider integrations. Live adapters can be added behind the discovery contract after an approved source is available, without changing the domain lifecycle.
