@@ -1,15 +1,4 @@
-const STAGES = ['Entry', 'Funding', 'Discovery', 'Issuance', 'Execution', 'Outcome'];
-const SCENARIOS = [
-  ['happy', 'Happy path'],
-  ['over-cap', 'Over-cap policy failure'],
-  ['unknown-checkout', 'Unknown checkout / reconcile'],
-  ['checkout-failure', 'Merchant decline'],
-  ['issuer-failure', 'Issuer failure'],
-  ['funding-failure', 'Funding verifier failure'],
-  ['discovery-failure', 'Discovery failure']
-];
-const TASK_CEILING_MINOR = 100000;
-const state = { task: null, tasks: [], audit: [], busy: false, error: null, selectedCandidate: null };
+const state = { tasks: [], task: null, wallet: null, audit: [], busy: false, error: null };
 const app = document.querySelector('#app');
 
 function escapeHtml(value) {
@@ -24,284 +13,117 @@ function formatMoney(minor, currency = 'XSGD') {
 function formatDate(value) {
   if (!value) return '-';
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'Unknown time';
-  return new Intl.DateTimeFormat('en-SG', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+  return Number.isNaN(date.getTime()) ? '-' : new Intl.DateTimeFormat('en-SG', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
 function shortId(value) {
   if (!value) return '-';
-  return value.length > 22 ? `${value.slice(0, 11)}…${value.slice(-7)}` : value;
+  return value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value;
 }
 
-function modeBadge(extra = '') {
-  return `<span class="mode-badge mode-badge-light"><span class="mode-dot"></span> DEMO / MOCK${extra ? ` · ${escapeHtml(extra)}` : ''}</span>`;
+function modeBadge(label = 'SIMULATED') {
+  return `<span class="mode-badge mode-badge-light"><span class="mode-dot"></span> ${escapeHtml(label)}</span>`;
 }
 
-function scenarioLabel(scenario) {
-  return SCENARIOS.find(([value]) => value === scenario)?.[1] || 'Unknown scenario';
+function stateClass(value) {
+  if (['completed', 'confirmed', 'delivered', 'fulfilled', 'reserved', 'authorized'].includes(value)) return 'success';
+  if (['failed', 'declined', 'out_of_stock', 'compensated'].includes(value)) return 'danger';
+  if (['unknown', 'reconciliation_required', 'pending', 'awaiting_selection'].includes(value)) return 'warning';
+  return 'neutral';
 }
 
-function scenarioOptions(selected) {
-  return SCENARIOS.map(([value, label]) => `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('');
+function statusPill(value) {
+  const label = String(value || 'pending').replaceAll('_', ' ');
+  return `<span class="status-pill ${stateClass(value)}">${escapeHtml(label)}</span>`;
 }
 
-function purchaseFor(task) {
-  if (task.purchase) return task.purchase;
-  return {
-    merchant: task.quote?.lockedSnapshot?.merchant || 'Discovery pending',
-    item: task.quote?.lockedSnapshot?.item || task.request?.raw || 'Item request not set',
-    amountMinor: task.quote?.lockedSnapshot?.totalMinor ?? null,
-    currency: task.currency
-  };
+function dataCell(label, value, note = '') {
+  return `<div class="data-cell"><span class="data-label">${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>${note ? `<small>${escapeHtml(note)}</small>` : ''}</div>`;
 }
 
-function requestIntentSummary(task) {
-  const intent = task.request?.intent;
-  if (!intent) return '';
-  const fields = [intent.brand, intent.productCategory, intent.keywords?.length ? `keywords: ${intent.keywords.join(', ')}` : ''].filter(Boolean);
-  return fields.join(' · ');
+function progressLabel(stage) {
+  return ({ intent: 'Intent interpreted', funding: 'Wallet and funding facts', discovery: 'Merchant discovery', quote: 'Quote selected', inventory: 'Stock reserved', payment: 'Wallet payment', merchant_credit: 'Merchant credited', order: 'Order created', fulfillment: 'Fulfillment', delivery: 'Delivery', receipt: 'Receipt', audit: 'Audit evidence' })[stage] || stage;
 }
 
-function taskOutcomeLabel(task) {
-  if (task.outcome?.label) return task.outcome.label;
-  if (task.failure?.message) return task.failure.message;
-  if (task.state === 'created') return 'Ready to open';
-  if (task.state === 'reconciliation_required') return 'Reconciliation required';
-  return task.state.replaceAll('_', ' ');
-}
-
-function parseAmountMinor(value) {
-  if (!/^\d+(?:\.\d{1,2})?$/.test(value.trim())) return null;
-  const minor = Math.round(Number(value.trim()) * 100);
-  return Number.isSafeInteger(minor) && minor > 0 ? minor : null;
-}
-
-function statePill(value) {
-  const classes = value === 'completed' ? '' : (value === 'failed' ? ' error' : (value === 'reconciliation_required' ? ' warning' : ' neutral'));
-  return `<span class="state-pill${classes}">${escapeHtml(value.replaceAll('_', ' '))}</span>`;
-}
-
-function dataCell(label, value, wrap = false) {
-  return `<div class="data-cell"><div class="data-label">${escapeHtml(label)}</div><div class="data-value${wrap ? ' wrap' : ''}">${escapeHtml(value)}</div></div>`;
-}
-
-function actionButton(label, action, className = 'button-primary', disabled = false) {
-  return `<button type="button" class="button ${className}" data-action="${escapeHtml(action)}"${disabled || state.busy ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
-}
-
-function currentStage(task) {
-  if (task.state === 'completed' || task.state === 'failed' || task.state === 'reconciliation_required') return 5;
-  if (task.state === 'instrument_issued' || task.state === 'executing' || task.state === 'authorized') return 4;
-  if (task.state === 'policy_approved' || task.state === 'issuing') return 3;
-  if (task.state === 'funded' || task.state === 'discovering' || task.state === 'quoted') return 2;
-  if (task.entryOpened) return 1;
-  return 0;
-}
-
-function failedStage(task) {
-  if (task.state !== 'failed') return null;
-  return { funding: 1, discovery: 2, policy: 3, issuance: 3, checkout: 4 }[task.failure?.stage] ?? 5;
-}
-
-function stageRail(task) {
-  const active = currentStage(task);
-  const failed = failedStage(task);
-  return `<nav class="stage-rail" aria-label="Purchase lifecycle stages">${STAGES.map((label, index) => {
-    const complete = failed === null ? index < active : index < failed;
-    const current = index === active;
-    const isFailed = index === failed;
-    const pending = failed !== null && index > failed && index < active;
-    const classes = [complete ? 'is-complete' : '', isFailed ? 'is-failed' : '', pending ? 'is-pending' : ''].filter(Boolean).join(' ');
-    return `<div class="stage-item ${classes}"${current ? ' aria-current="step"' : ''}>
-      <span class="stage-number">${complete ? '✓' : (isFailed ? '!' : String(index + 1).padStart(2, '0'))}</span><span class="stage-label">${label}</span>
-    </div>`;
-  }).join('')}</nav>`;
-}
-
-function hero(task) {
-  const active = currentStage(task);
-  const titles = [
-    ['Assigned purchase, bounded from the start', 'Review the single task authority before any provider action.'],
-    ['Prove the funding, then separate the settlement truth', 'The chain observation is evidence. It is not silently treated as card spendable balance.'],
-    ['Find one item. Lock one exact quote.', 'Discovery is simulated, deterministic, and expires. Nothing broad can be issued before the lock.'],
-    ['Issue authority for this purchase only', 'The server policy receipt is the gate. The instrument cannot be reused or widened.'],
-    ['Execute once, with a scrubbed activity trail', 'The mock merchant receives only the locked scope. Unknown results stop for reconciliation.'],
-    ['Show what financially happened', 'Authorization, capture, retirement, and redacted audit evidence stay distinct.']
-  ];
-  return `<section class="hero" aria-labelledby="page-title"><div><p class="eyebrow">Operator console / stage ${String(active + 1).padStart(2, '0')} of 06</p><h1 id="page-title" tabindex="-1">${titles[active][0]}</h1><p class="lede">${titles[active][1]}</p></div><div class="hero-meta"><div class="hero-meta-label">Immutable task ceiling</div><div class="hero-meta-value">${formatMoney(task.spendingCeilingMinor, task.currency)}</div><div class="hero-meta-detail">${escapeHtml(scenarioLabel(task.scenario))} · one merchant · one capture</div></div></section>`;
-}
-
-function notice() {
-  return `<section class="notice" role="note"><span class="notice-icon" aria-hidden="true">i</span><div><strong>Honest demo mode</strong><p>Discovery catalog, on-chain evidence, issuer, and merchant checkout are deterministic local fixtures. No LLM, live web search, or provider credentials are used. Every consequential card repeats the DEMO / MOCK label.</p></div></section>`;
-}
-
-function workspace(task) {
-  const purchase = purchaseFor(task);
-  const terminal = ['completed', 'failed'].includes(task.state);
-  const unknown = task.state === 'reconciliation_required' || task.outcome?.status === 'unknown';
-  const taskItems = state.tasks.length ? state.tasks : [task];
-  const currentDescription = task.request
-    ? `Request: ${task.request.raw}`
-    : `${purchase.item} · ${formatMoney(purchase.amountMinor, purchase.currency || task.currency)}`;
-  return `<section class="workspace card" aria-labelledby="workspace-title">
-    <div class="workspace-create">
-      <div class="workspace-heading"><div class="panel-label">Operator workspace</div><h2 id="workspace-title">One bounded purchase</h2><p>Enter a request such as <strong>I want Apple earphones</strong>. NaviPay interprets it, ranks local candidates, auto-selects a clear in-budget match, and runs the safeguarded purchase end to end. Manual choice is only needed when the request or provider result is genuinely unclear.</p></div>
-      <form id="request-form" class="request-form" novalidate>
-        <div class="form-field"><label for="request-input">Purchase request</label><input id="request-input" name="request" type="text" maxlength="240" autocomplete="off" placeholder="I want Apple earphones" aria-describedby="request-hint" required><p class="field-hint" id="request-hint">Deterministic parsing only: brand, product category, and keywords. No LLM or live web search.</p></div>
-        <div class="form-actions"><button class="button button-lime" type="submit"${state.busy ? ' disabled' : ''}>Create request task</button><p class="form-error" id="request-form-error" role="alert" hidden></p></div>
-      </form>
-      <details class="direct-entry"><summary>Use the direct merchant, item, and amount path</summary><p>Direct task creation remains available when an exact merchant and XSGD total are already known.</p>
-        <form id="task-form" class="task-form" novalidate>
-          <div class="form-field"><label for="merchant-input">Merchant</label><input id="merchant-input" name="merchant" type="text" maxlength="120" autocomplete="organization" placeholder="e.g. Harbor Supply" required></div>
-          <div class="form-field"><label for="item-input">Item</label><input id="item-input" name="item" type="text" maxlength="180" autocomplete="off" placeholder="e.g. Anker 737 Power Bank" required></div>
-          <div class="form-field amount-field"><label for="amount-input">Amount <span>(XSGD)</span></label><input id="amount-input" name="amount" type="text" inputmode="decimal" pattern="\\d+(?:\\.\\d{1,2})?" maxlength="12" placeholder="89.50" aria-describedby="amount-hint" required><p class="field-hint" id="amount-hint">Up to ${formatMoney(TASK_CEILING_MINOR, 'XSGD')}.</p></div>
-          <div class="form-actions"><button class="button button-secondary" type="submit"${state.busy ? ' disabled' : ''}>Create direct task</button><p class="form-error" id="task-form-error" role="alert" hidden></p></div>
-        </form>
-      </details>
-    </div>
-    <div class="workspace-current" aria-label="Current task context"><div class="panel-label">Current task</div><div class="current-task-title"><strong>${escapeHtml(task.request ? 'Natural request' : purchase.merchant)}</strong><span>${statePill(task.state)}</span></div><p>${escapeHtml(currentDescription)}</p>${task.request ? `<p class="intent-summary">Parsed intent: ${escapeHtml(requestIntentSummary(task))}</p>` : ''}<div class="current-task-meta"><span>${escapeHtml(shortId(task.id))}</span><span>${formatDate(task.updatedAt)}</span></div>${task.automation?.status ? `<p class="run-status">Run: ${escapeHtml(task.automation.status.replaceAll('_', ' '))}${task.automation.nextAction && task.automation.nextAction !== 'none' ? ` · ${escapeHtml(task.automation.nextAction)}` : ''}</p>` : ''}${terminal && !unknown ? '<button type="button" class="button button-secondary button-small" data-action="replay-task">Safely replay as new task</button>' : ''}${unknown ? '<p class="safe-replay-note">Replay blocked until this unknown checkout is reconciled. The original checkout will never be repeated automatically.</p>' : ''}</div>
-    <div class="workspace-history"><div class="history-heading"><div><div class="panel-label">Task history</div><h3>Persisted runs</h3></div><span class="history-count">${taskItems.length} task${taskItems.length === 1 ? '' : 's'}</span></div><p class="history-intro">Select any task to inspect its current lifecycle and redacted audit evidence. Completed outcomes stay here after reload.</p><ol class="task-list">${taskItems.map((item) => { const itemPurchase = purchaseFor(item); const itemTitle = item.request ? 'Natural request' : itemPurchase.merchant; const itemLabel = item.request ? item.request.raw : itemPurchase.item; return `<li><button type="button" class="task-list-item${item.id === task.id ? ' is-current' : ''}" data-task-id="${escapeHtml(item.id)}"${item.id === task.id ? ' aria-current="page"' : ''}><span class="task-list-main"><strong>${escapeHtml(itemTitle)}</strong><span>${escapeHtml(itemLabel)}</span></span><span class="task-list-side"><span>${formatMoney(itemPurchase.amountMinor, itemPurchase.currency || item.currency)}</span>${statePill(item.state)}<small>${escapeHtml(taskOutcomeLabel(item))}</small></span></button></li>`; }).join('')}</ol></div>
-  </section>`;
-}
-
-function taskBrief(task) {
-  const purchase = purchaseFor(task);
-  const isRequest = Boolean(task.request);
-  const heading = isRequest ? 'Natural purchase request' : (task.origin === 'seed' ? 'Seeded purchase brief' : (task.origin === 'replay' ? 'Safely replayed purchase brief' : 'Assigned purchase brief'));
-  const details = isRequest
-    ? `${dataCell('Task reference', shortId(task.id))}${dataCell('Run type', 'Operator natural request')}${dataCell('Parsed brand', task.request.intent.brand || 'Not detected')}${dataCell('Product category', task.request.intent.productCategory || 'Not detected')}${dataCell('Keywords', task.request.intent.keywords.join(', '), true)}${dataCell('Spending ceiling', formatMoney(task.spendingCeilingMinor, task.currency))}`
-    : `${dataCell('Task reference', shortId(task.id))}${dataCell('Run type', task.origin === 'seed' ? 'Seeded local run' : (task.origin === 'replay' ? 'New task from prior result' : 'Operator-created run'))}${dataCell('Agent authority', 'Assigned purchase only')}${dataCell('Demo scenario', scenarioLabel(task.scenario))}${dataCell('Requested merchant', purchase.merchant)}${dataCell('Requested item', purchase.item)}${dataCell('Requested amount', formatMoney(purchase.amountMinor, task.currency))}${dataCell('Spending ceiling', formatMoney(task.spendingCeilingMinor, task.currency))}`;
-  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">01 / Entry</div><h2>${heading}</h2><p>${isRequest ? 'The request is parsed deterministically before any catalog result can become payment authority.' : 'A single task, with no wallet or reusable card surface.'}</p></div>${modeBadge('entry')}</div>
-    ${isRequest ? `<div class="request-callout"><strong>${escapeHtml(task.request.raw)}</strong><p>${escapeHtml(requestIntentSummary(task))}</p></div>` : ''}<div class="brief-grid">${details}</div>
-    <div class="locked-callout"><strong>Start here</strong><p>Verify fixture evidence, review ranked candidates, lock one quote, pass server policy, issue one scoped instrument, then execute one mock checkout. Opening records an audit event, but does not authorize a payment.</p></div>
-    <div class="action-row">${actionButton('Open assigned task', 'open-task', 'button-lime')}<p class="action-help">The next step will verify funding evidence.</p></div>
-  </article>`;
-}
-
-function fundingPanel(task) {
-  if (!task.funding) {
-    return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">02 / Funding</div><h2>Verify funding evidence</h2><p>Read-only chain evidence and card settlement status are intentionally separate.</p></div>${modeBadge('funding')}</div>
-      <div class="money-truths"><div class="truth-card on-chain"><h3>On-chain evidence</h3><div class="big">Awaiting verification</div><p>Network, token, recipient, amount, and receipt will be checked.</p><span class="truth-status">Not checked</span></div><div class="truth-card settlement"><h3>Card-spendable settlement</h3><div class="big">Not asserted</div><p>This status comes from the mock issuer ledger, not from the chain observation.</p><span class="truth-status">Separate truth</span></div></div>
-      <div class="action-row">${actionButton('Verify fixture funding', 'verify-funding', 'button-lime')}<p class="action-help">This is a simulated verifier call.</p></div>
-    </article>`;
-  }
-  const funding = task.funding;
-  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">02 / Funding</div><h2>Funding evidence recorded</h2><p>The two money truths are visible without collapsing them.</p></div>${modeBadge('funding')}</div>
-    <div class="money-truths"><div class="truth-card on-chain"><h3>On-chain evidence</h3><div class="big">${escapeHtml(funding.onChain.asset)} ${((funding.onChain.amountMinor || 0) / 100).toLocaleString('en-SG', { minimumFractionDigits: 2 })}</div><p>${escapeHtml(funding.onChain.network)} · ${escapeHtml(funding.onChain.confirmations)} confirmations</p><span class="truth-status">✓ Verified fixture</span></div><div class="truth-card settlement"><h3>Card-spendable settlement</h3><div class="big">${escapeHtml(funding.settlement.status.replaceAll('-', ' '))}</div><p>${escapeHtml(funding.settlement.note)}</p><span class="truth-status">${funding.settlement.spendable ? '✓ Mock only' : 'Not spendable'}</span></div></div>
-    <dl class="detail-list"><div class="detail-row"><dt>Transaction reference</dt><dd class="wrap">${escapeHtml(funding.onChain.transactionReference)}</dd></div><div class="detail-row"><dt>Observed</dt><dd>${formatDate(funding.onChain.observedAt)}</dd></div><div class="detail-row"><dt>Recipient</dt><dd>${escapeHtml(funding.onChain.recipient)}</dd></div></dl>
-    <div class="action-row">${actionButton('Continue to discovery', 'go-discovery', 'button-lime')}<p class="action-help">Evidence is recorded; discovery remains a separate adapter call.</p></div>
-  </article>`;
-}
-
-function quoteCard(task) {
-  const quote = task.quote;
-  if (!quote) {
-    return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">03 / Discovery + quote lock</div><h2>Find relevant candidates</h2><p>Search the seeded local catalog, rank by the parsed request, and return a small quote set. No broad shopping authority is created.</p></div>${modeBadge('discovery')}</div><div class="locked-callout"><strong>Request to candidates</strong><p>${escapeHtml(task.request?.raw || purchaseFor(task).item)}. Results are DEMO / MOCK local fixtures and expire in 15 minutes.</p></div><div class="action-row">${actionButton('Discover ranked candidates', 'discover', 'button-lime')}<p class="action-help">Deterministic parser and local catalog adapter.</p></div></article>`;
-  }
-  if (!quote.locked) {
-    const selected = state.selectedCandidate || quote.recommendedCandidateId;
-    return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">03 / Discovery + quote lock</div><h2>Choose the exact purchase</h2><p>Select one candidate. Merchant, item, variant, total, currency, availability, evidence, and expiry lock together.</p></div>${modeBadge('quote')}</div><div class="candidate-list" role="radiogroup" aria-label="Quote candidates">${quote.candidates.map((candidate) => `<label class="candidate${selected === candidate.id ? ' selected' : ''}"><input type="radio" name="candidate" value="${escapeHtml(candidate.id)}" data-candidate="${escapeHtml(candidate.id)}"${selected === candidate.id ? ' checked' : ''}><span class="candidate-content"><div class="candidate-heading"><h3>${escapeHtml(candidate.item)}</h3><span class="availability ${candidate.availability === 'limited' ? 'limited' : ''}">${escapeHtml(candidate.availability.replaceAll('_', ' '))}</span></div><p>${escapeHtml(candidate.variant)} · ${escapeHtml(candidate.merchant)}</p><dl class="candidate-details"><div><dt>Merchant</dt><dd>${escapeHtml(candidate.merchant)}</dd></div><div><dt>Price</dt><dd>${formatMoney(candidate.totalMinor, candidate.currency)}</dd></div><div><dt>Currency</dt><dd>${escapeHtml(candidate.currency)}</dd></div><div><dt>Expiry</dt><dd>${formatDate(candidate.expiresAt)}</dd></div></dl><p class="candidate-reason">Why shown: ${escapeHtml(candidate.selectionReason)}</p><p class="candidate-evidence">Evidence: ${escapeHtml(candidate.evidence.source)} · ${escapeHtml(candidate.evidence.note)}</p></span><span class="candidate-total">${formatMoney(candidate.totalMinor, candidate.currency)}</span></label>`).join('')}</div><div class="action-row">${actionButton(task.automation?.status === 'awaiting_selection' ? 'Confirm selection and finish run' : 'Lock selected quote', 'lock-quote', 'button-lime')}<p class="action-help">${task.automation?.status === 'awaiting_selection' ? 'The server will lock this quote, run policy, issue scoped authority, and complete one mock checkout.' : 'Locking is immutable for this task.'}</p></div></article>`;
-  }
-  const locked = quote.lockedSnapshot;
-  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">03 / Discovery + quote lock</div><h2>Selected quote locked</h2><p>This is the only purchase scope the server can approve.</p></div>${modeBadge('locked')}</div><div class="locked-callout"><strong>${escapeHtml(locked.item)} · ${formatMoney(locked.totalMinor, locked.currency)}</strong><p>${escapeHtml(locked.merchant)} · ${escapeHtml(locked.variant)} · ${escapeHtml(locked.availability)} · expires ${formatDate(locked.expiresAt)}</p></div><dl class="detail-list"><div class="detail-row"><dt>Merchant</dt><dd>${escapeHtml(locked.merchant)} (${escapeHtml(locked.merchantDomain)})</dd></div><div class="detail-row"><dt>Item and variant</dt><dd>${escapeHtml(locked.item)} / ${escapeHtml(locked.variant)}</dd></div><div class="detail-row"><dt>Total and currency</dt><dd>${formatMoney(locked.totalMinor, locked.currency)} / ${escapeHtml(locked.currency)}</dd></div><div class="detail-row"><dt>Quote reference</dt><dd>${escapeHtml(locked.quoteId)}</dd></div><div class="detail-row"><dt>Evidence</dt><dd>${escapeHtml(locked.evidence?.source || 'Local catalog fixture')}</dd></div><div class="detail-row"><dt>Locked at</dt><dd>${formatDate(quote.lockedAt)}</dd></div><div class="detail-row"><dt>Expiry</dt><dd>${formatDate(locked.expiresAt)}</dd></div></dl><div class="action-row">${actionButton('Run server policy approval', 'approve-policy', 'button-lime')}<p class="action-help">The hard ceiling is checked before any instrument exists.</p></div></article>`;
-}
-
-function policyChecks(policy) {
-  if (!policy) return '';
-  return `<div class="check-list" aria-label="Policy checks">${policy.checks.map((check) => `<div class="check${check.status === 'failed' ? ' failed' : ''}"><span class="check-icon">${check.status === 'passed' ? '✓' : '!'}</span><span><strong>${escapeHtml(check.label)}</strong></span><span class="check-detail">${escapeHtml(check.detail)}</span></div>`).join('')}</div>`;
-}
-
-function issuancePanel(task) {
-  const scope = task.quote.lockedSnapshot;
-  if (!task.instrument) {
-    return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">04 / Issuance</div><h2>Policy passed. Issue narrow authority.</h2><p>The issuer receives a frozen scope, not a reusable payment credential.</p></div>${modeBadge('issuance')}</div>${policyChecks(task.policy)}<div class="scope-card"><div class="scope-heading"><strong>Proposed one-use scope</strong><span class="scope-lock">LOCKED</span></div><dl class="detail-list"><div class="detail-row"><dt>Merchant</dt><dd>${escapeHtml(scope.merchantDomain)}</dd></div><div class="detail-row"><dt>Item</dt><dd>${escapeHtml(scope.item)} / ${escapeHtml(scope.variant)}</dd></div><div class="detail-row"><dt>Exact amount</dt><dd>${formatMoney(scope.totalMinor, scope.currency)}</dd></div><div class="detail-row"><dt>Capture limit</dt><dd>1 successful capture</dd></div><div class="detail-row"><dt>Credentials</dt><dd>Provider-controlled and redacted</dd></div></dl></div><div class="action-row">${actionButton('Issue mock scoped instrument', 'issue-instrument', 'button-lime')}<p class="action-help">No sensitive payment material enters this console.</p></div></article>`;
-  }
-  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">04 / Issuance</div><h2>Scoped instrument is ready</h2><p>One task, one merchant, one amount, one successful capture.</p></div>${modeBadge('issued')}</div><div class="scope-card"><div class="scope-heading"><strong>${escapeHtml(task.instrument.reference)}</strong><span class="scope-lock">ACTIVE · ONE USE</span></div><dl class="detail-list"><div class="detail-row"><dt>Merchant</dt><dd>${escapeHtml(task.instrument.scope.merchantDomain)}</dd></div><div class="detail-row"><dt>Exact amount</dt><dd>${formatMoney(task.instrument.scope.amountMinor, task.instrument.scope.currency)}</dd></div><div class="detail-row"><dt>Expires</dt><dd>${formatDate(task.instrument.scope.expiresAt)}</dd></div><div class="detail-row"><dt>Reuse</dt><dd>Blocked</dd></div></dl></div><div class="action-row">${actionButton('Continue to execution', 'go-execution', 'button-lime')}<p class="action-help">The next action is one checkout attempt.</p></div></article>`;
-}
-
-function executionPanel(task) {
-  const scope = task.instrument.scope;
-  if (!task.checkout) {
-    return `<article class="card execution-card"><div class="execution-head"><div class="panel-label" style="color:#b8f36b">05 / Execution · simulated</div><h2>One compact checkout run</h2><p>Only scrubbed verbs, merchant domain, and exact amount are shown. No browser secrets are exposed.</p></div><div class="card-pad"><div class="brief-grid">${dataCell('Merchant', scope.merchantDomain)}${dataCell('Amount', formatMoney(scope.amountMinor, scope.currency))}${dataCell('Item', scope.item)}${dataCell('Authority', 'One capture, then retire')}</div><div class="activity-list"><div class="activity"><span class="activity-dot"></span><span>Scope checked against locked quote</span><time>ready</time></div><div class="activity"><span class="activity-dot"></span><span>Mock merchant checkout awaits operator action</span><time>ready</time></div></div><div class="action-row">${actionButton('Authorize payment once', 'execute-checkout', 'button-coral')}<p class="action-help">Unknown results stop here for reconciliation - never blind retry.</p></div></div></article>`;
-  }
-  return `<article class="card execution-card"><div class="execution-head"><div class="panel-label" style="color:#b8f36b">05 / Execution · recorded</div><h2>Checkout attempt recorded</h2><p>${escapeHtml(task.checkout.status === 'unknown' ? 'No definitive result. Reconciliation is required before any further action.' : 'The merchant response is recorded and the next lifecycle screen has the result.')}</p></div><div class="activity-list"><div class="activity"><span class="activity-dot"></span><span>Scope checked against locked quote</span><time>passed</time></div><div class="activity"><span class="activity-dot"></span><span>Merchant domain: ${escapeHtml(task.checkout.merchantDomain)}</span><time>${formatMoney(task.checkout.amountMinor, task.checkout.currency)}</time></div><div class="activity"><span class="activity-dot"></span><span>Provider response: ${escapeHtml(task.checkout.status)}</span><time>${formatDate(task.checkout.attemptedAt)}</time></div></div></article>`;
-}
-
-function auditPanel(task) {
-  return `<article class="card card-pad audit-inspector" aria-labelledby="audit-title"><div class="audit-header"><div><div class="panel-label">Redacted evidence</div><h2 id="audit-title">Inspect this task's audit</h2><p>Append-only lifecycle evidence. Payment credentials, keys, and sensitive provider material are never displayed.</p></div><span class="mode-badge mode-badge-light">${state.audit.length} events</span></div><div class="audit-truth-note"><strong>Evidence boundary</strong><span>Funding verification records on-chain evidence separately from card-spendable settlement. Neither field is a payment credential.</span></div><ol class="audit-list">${state.audit.slice().reverse().map((event) => `<li class="audit-event event-${escapeHtml(event.status)}"><span class="event-dot"></span><span><div class="audit-summary">${escapeHtml(event.summary)}</div><div class="audit-type">${escapeHtml(event.type)}</div></span><time class="audit-time">${formatDate(event.occurredAt)}</time></li>`).join('')}</ol></article>`;
-}
-
-function runTimeline(task) {
-  const stages = [
-    ['Entry', ['task.created', 'task.opened']],
-    ['Funding verified', ['funding.verified', 'funding.failed']],
-    ['Candidates ranked', ['discovery.quoted', 'discovery.failed']],
-    ['Quote and policy locked', ['quote.locked', 'policy.approved', 'policy.declined']],
-    ['Scoped checkout', ['instrument.issued', 'instrument.failed', 'checkout.authorized', 'checkout.declined', 'checkout.unknown', 'checkout.failed']],
-    ['Receipt and audit', ['task.completed', 'checkout.reconciled']]
-  ];
-  const events = state.audit;
-  return `<ol class="run-timeline" aria-label="Backend purchase progress">${stages.map(([label, types]) => {
-    const event = events.find((item) => types.includes(item.type));
-    const failed = event?.status === 'error' || (task.failure && (label === 'Receipt and audit' || (label === 'Funding verified' && task.failure.stage === 'funding') || (label === 'Candidates ranked' && task.failure.stage === 'discovery') || (label === 'Quote and policy locked' && task.failure.stage === 'policy') || (label === 'Scoped checkout' && ['issuance', 'checkout'].includes(task.failure.stage))));
-    const complete = Boolean(event) && !failed;
-    const current = !complete && !failed;
-    return `<li class="run-timeline-item${complete ? ' is-complete' : ''}${failed ? ' is-failed' : ''}${current ? ' is-current' : ''}"><span class="run-timeline-mark">${complete ? '✓' : (failed ? '!' : '•')}</span><span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(failed ? 'Stopped safely' : (complete ? 'Recorded' : 'Awaiting'))}</small></span></li>`;
-  }).join('')}</ol>`;
+function intentPanel(task) {
+  const intent = task.request.intent;
+  return `<section class="panel intent-panel"><div class="panel-heading"><div><span class="overline">Interpreted request</span><h2>${escapeHtml(task.request.raw)}</h2></div>${modeBadge('LOCAL PARSER')}</div><div class="intent-grid">${dataCell('Product category', intent.productCategory || 'Not detected')}${dataCell('Brand', intent.brand || 'Any brand')}${dataCell('Keywords', intent.keywords.join(', '))}${dataCell('Request reference', shortId(task.id))}</div><p class="muted">NaviPay uses a deterministic local parser. The interpreted intent is retained in the task record before discovery begins.</p></section>`;
 }
 
 function recommendationPanel(task) {
   const quote = task.quote;
-  if (!quote?.candidates?.length) return '';
-  const selected = quote.candidates.find((candidate) => candidate.id === quote.selectedCandidateId) || quote.candidates.find((candidate) => candidate.id === quote.recommendedCandidateId);
-  const recommendation = quote.recommendation;
-  return `<section class="recommendation-card"><div class="recommendation-heading"><div><div class="panel-label">Discovery result</div><h3>${recommendation?.status === 'clear' ? 'Best clear match selected automatically' : 'Candidate review required'}</h3></div>${modeBadge('local catalog')}</div><p class="recommendation-reason">${escapeHtml(recommendation?.reason || 'Ranked by the deterministic local catalog adapter.')}</p>${selected ? `<div class="recommendation-selected"><strong>${escapeHtml(selected.item)}</strong><span>${escapeHtml(selected.merchant)} · ${formatMoney(selected.totalMinor, selected.currency)}</span><small>${escapeHtml(selected.variant)} · ${escapeHtml(selected.availability.replaceAll('_', ' '))}</small></div>` : ''}<ul class="recommendation-list">${quote.candidates.slice(0, 4).map((candidate) => `<li class="${candidate.id === quote.selectedCandidateId ? 'is-selected' : ''}"><span>${candidate.id === quote.selectedCandidateId ? '✓' : '•'}</span><span><strong>${escapeHtml(candidate.item)}</strong><small>${escapeHtml(candidate.merchant)} · ${formatMoney(candidate.totalMinor, candidate.currency)} · score ${escapeHtml(candidate.relevanceScore)}</small></span></li>`).join('')}</ul><p class="recommendation-disclosure">DEMO / MOCK local fixture. Candidates are evidence-backed quotes, not live marketplace results.</p></section>`;
+  if (!quote) return `<section class="panel empty-panel"><span class="overline">Recommended item</span><h2>Waiting for discovery</h2><p class="muted">The local merchant sandbox will find an in-stock keyboard, mouse, or earphone after you run a request.</p></section>`;
+  const chosen = quote.candidates.find((candidate) => candidate.id === quote.selectedCandidateId) || quote.candidates.find((candidate) => candidate.id === task.recommendation?.candidateId) || quote.candidates[0];
+  const recommendation = task.recommendation || quote.recommendation || {};
+  return `<section class="panel recommendation-panel"><div class="panel-heading"><div><span class="overline">Recommended item</span><h2>${recommendation.status === 'clear' || recommendation.status === 'fallback_available' ? 'Best clear match' : 'Candidate review required'}</h2></div>${modeBadge('SEEDED MERCHANTS')}</div><div class="recommendation-main"><div><span class="product-kicker">${escapeHtml(chosen?.brand || 'Local catalog')} · ${escapeHtml(chosen?.productCategory || '')}</span><h3>${escapeHtml(chosen?.item || 'No item selected')}</h3><p>${escapeHtml(chosen?.variant || '')}</p><p class="merchant-line">${escapeHtml(chosen?.merchant || '')}</p></div><strong class="recommendation-price">${formatMoney(chosen?.totalMinor, chosen?.currency)}</strong></div><div class="recommendation-facts">${dataCell('Stock', chosen?.availability === 'in_stock' ? `${chosen.stockQuantity} available` : 'Out of stock')}${dataCell('Merchant', chosen?.merchant || '-')}${dataCell('Quote total', formatMoney(chosen?.totalMinor, chosen?.currency))}${dataCell('Quote expiry', formatDate(chosen?.quoteExpiresAt))}</div><p class="recommendation-reason">${escapeHtml(recommendation.reason || chosen?.matchReasons?.join(' · ') || '')}</p><p class="disclosure">SIMULATED catalog evidence. Merchant IDs, SKU, variant, stock, price, and quote expiry are persisted with the run.</p></section>`;
+}
+
+function progressPanel(task) {
+  return `<section class="panel progress-panel"><div class="panel-heading"><div><span class="overline">Automatic orchestration</span><h2>One run, correlated evidence</h2></div>${statusPill(task.automation.status)}</div><ol class="progress-list">${task.progress.map((item) => `<li class="progress-item ${stateClass(item.status)}"><span class="progress-mark">${item.status === 'completed' ? '✓' : item.status === 'failed' ? '!' : item.status === 'unknown' ? '?' : item.status === 'running' ? '•' : ''}</span><span><strong>${escapeHtml(progressLabel(item.stage))}</strong><small>${escapeHtml(item.detail || item.status.replaceAll('_', ' '))}${item.reference ? ` · ${escapeHtml(shortId(item.reference))}` : ''}</small></span>${statusPill(item.status)}</li>`).join('')}</ol><p class="muted progress-note">The server advances each boundary without manual stage controls. Every reference is correlated to this purchase.</p></section>`;
+}
+
+function statusPanel(task) {
+  const reservationStatus = task.inventory?.reservation?.status || (task.failure?.stage === 'inventory' ? 'out_of_stock' : 'pending');
+  const orderStatus = task.order?.status || 'pending';
+  const fulfillmentStatus = task.fulfillment?.status || 'pending';
+  const deliveryStatus = task.delivery?.status || 'pending';
+  return `<section class="panel status-panel"><div class="panel-heading"><div><span class="overline">Commerce status</span><h2>What happened</h2></div>${modeBadge('CORRELATED')}</div><div class="status-grid"><div class="status-card"><span>Stock reservation</span>${statusPill(reservationStatus)}<small>${escapeHtml(task.inventory?.reservation?.reference ? shortId(task.inventory.reservation.reference) : 'No lease')}</small></div><div class="status-card"><span>Payment</span>${statusPill(task.payment?.status || 'pending')}<small>${escapeHtml(task.payment?.reference ? shortId(task.payment.reference) : 'No debit')}</small></div><div class="status-card"><span>Order</span>${statusPill(orderStatus)}<small>${escapeHtml(task.order?.reference ? shortId(task.order.reference) : 'Not created')}</small></div><div class="status-card"><span>Fulfillment</span>${statusPill(fulfillmentStatus)}<small>${escapeHtml(task.fulfillment?.reference ? shortId(task.fulfillment.reference) : 'Not started')}</small></div><div class="status-card"><span>Delivery</span>${statusPill(deliveryStatus)}<small>${escapeHtml(task.delivery?.trackingReference ? shortId(task.delivery.trackingReference) : 'Not started')}</small></div><div class="status-card"><span>Purchase</span>${statusPill(task.purchaseStatus)}<small>${escapeHtml(task.state.replaceAll('_', ' '))}</small></div></div></section>`;
+}
+
+function walletPanel(task) {
+  const wallet = state.wallet || {};
+  const after = task.wallet?.balanceAfterMinor;
+  const chain = task.funding;
+  return `<section class="panel wallet-panel"><div class="panel-heading"><div><span class="overline">Spendable source</span><h2>Fake wallet balance</h2></div>${modeBadge('XSGD LEDGER')}</div><div class="wallet-balance">${formatMoney(after ?? wallet.balanceMinor, wallet.currency)}<small>current balance</small></div><div class="wallet-meta"><span>${escapeHtml(wallet.name || 'NaviPay Demo Wallet')}</span><span>${escapeHtml(wallet.ownerName || 'Demo Customer')}</span></div><div class="wallet-ledger-fact"><span class="fact-icon">↔</span><span><strong>Double-entry transfer</strong><small>${task.payment?.transactionReference ? escapeHtml(shortId(task.payment.transactionReference)) : 'Debit and merchant credit appear here after a confirmed payment.'}</small></span></div>${chain ? `<div class="chain-fact"><span class="chain-fact-label">Separate chain evidence</span><strong>${formatMoney(chain.amountMinor, chain.asset)}</strong><small>${escapeHtml(chain.network)} · ${escapeHtml(chain.transactionReference)}</small></div>` : ''}<p class="disclosure">Seeded fake wallet only. This balance is the spendable source. Chain evidence above is a separate simulated fact.</p></section>`;
+}
+
+function customerPanel(task) {
+  const address = task.customer.address;
+  return `<section class="panel customer-panel"><div class="panel-heading"><div><span class="overline">Simulated customer</span><h2>${escapeHtml(task.customer.name)}</h2></div><span class="fixture-chip">FIXTURE</span></div><p class="address-label">${escapeHtml(address.label)}</p><address>${address.lines.map((line) => escapeHtml(line)).join('<br>')}</address><p class="muted">${escapeHtml(task.customer.disclosure)}</p></section>`;
 }
 
 function receiptPanel(task) {
+  if (!task.receipt) return `<section class="panel receipt-panel empty-panel"><span class="overline">Receipt</span><h2>Not issued yet</h2><p class="muted">A confirmed receipt appears only after fake payment and order creation. Fulfillment and delivery are shown separately.</p></section>`;
   const receipt = task.receipt;
-  if (!receipt) return '';
-  const capture = receipt.captureReference || 'Not returned by provider; resolution recorded';
-  return `<section class="receipt-card" aria-labelledby="receipt-title"><div class="receipt-heading"><div><div class="panel-label">Final receipt</div><h3 id="receipt-title">Purchase receipt</h3></div><span class="receipt-status">CONFIRMED · MOCK</span></div><div class="receipt-main"><strong>${escapeHtml(receipt.item)}</strong><span>${escapeHtml(receipt.merchant)} · ${formatMoney(receipt.amountMinor, receipt.currency)}</span><small>${escapeHtml(receipt.variant)}</small></div><dl class="detail-list"><div class="detail-row"><dt>Receipt reference</dt><dd>${escapeHtml(receipt.id)}</dd></div><div class="detail-row"><dt>Checkout reference</dt><dd>${escapeHtml(receipt.checkoutReference)}</dd></div><div class="detail-row"><dt>Capture</dt><dd>${escapeHtml(capture)}</dd></div><div class="detail-row"><dt>Authority</dt><dd>${escapeHtml(receipt.authority)}</dd></div></dl><p class="receipt-disclosure">${escapeHtml(receipt.disclosure)}</p></section>`;
+  return `<section class="panel receipt-panel"><div class="panel-heading"><div><span class="overline">Receipt</span><h2>Purchase confirmed</h2></div><span class="receipt-stamp">CONFIRMED</span></div><div class="receipt-product"><strong>${escapeHtml(receipt.item)}</strong><span>${escapeHtml(receipt.merchant)} · ${formatMoney(receipt.amountMinor, receipt.currency)}</span><small>${escapeHtml(receipt.variant)}</small></div><dl class="detail-list"><div><dt>Order</dt><dd>${escapeHtml(receipt.orderReference)}</dd></div><div><dt>Payment</dt><dd>${escapeHtml(receipt.paymentReference)}</dd></div><div><dt>Merchant credit</dt><dd>${escapeHtml(receipt.merchantCreditReference)}</dd></div><div><dt>Fulfillment</dt><dd>${statusPill(receipt.fulfillmentStatus)}</dd></div><div><dt>Delivery</dt><dd>${statusPill(receipt.deliveryStatus)}</dd></div></dl><p class="disclosure">${escapeHtml(receipt.disclosure)}</p></section>`;
 }
 
-function outcomePanel(task) {
-  const unknown = task.state === 'reconciliation_required';
-  const success = task.state === 'completed';
-  const outcome = task.outcome || {};
-  const title = success ? 'Purchase confirmed' : (unknown ? 'Checkout needs reconciliation' : 'Task stopped safely');
-  const message = success
-    ? (outcome.label === 'Reconciled as authorized' ? 'The unknown provider result was reconciled as authorized. The one-use instrument was retired without a retry.' : 'The mock authorization was captured, the receipt was persisted, and the one-use instrument was retired.')
-    : unknown
-      ? 'The provider result is unknown. NaviPay has blocked automatic replay. Confirm the provider result before resolving.'
-      : (task.failure?.message || 'The lifecycle ended without an authorization.');
-  const failureTitles = { policy: 'Policy stopped before issuance', issuance: 'Scoped instrument was not issued', funding: 'Funding evidence could not be verified', discovery: 'Discovery could not return a quote', checkout: 'Checkout stopped safely' };
-  const terminalTitle = failureTitles[task.failure?.stage] || 'Task stopped safely';
-  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">06 / Outcome + audit</div><h2>Financial truth, not a green guess</h2><p>Authorization, capture, retirement, receipt, and reconciliation remain explicit.</p></div>${modeBadge('outcome')}</div><div class="outcome-banner${success ? '' : (unknown ? ' warning' : ' error')}" role="${success || unknown ? 'status' : 'alert'}" aria-live="polite"><h2>${success ? title : (unknown ? title : terminalTitle)}</h2><p>${escapeHtml(message)}</p></div>${recommendationPanel(task)}${receiptPanel(task)}<div class="outcome-meta">${dataCell('Lifecycle state', task.state.replaceAll('_', ' '))}${dataCell('Outcome', outcome.label || task.failure?.code || 'No authorization')}${dataCell('Checkout reference', shortId(task.checkout?.checkoutReference))}${dataCell('Authority status', task.instrument?.status || 'Not issued')}</div>${unknown ? `<div class="action-row"><button type="button" class="button button-lime" data-action="reconcile-authorized"${state.busy ? ' disabled' : ''}>Reconcile as authorized</button><button type="button" class="button button-secondary" data-action="reconcile-declined"${state.busy ? ' disabled' : ''}>Reconcile as declined</button><p class="action-help">Resolution records a new event. It never retries checkout.</p></div>` : ''}${task.policy ? `<div><div class="panel-label" style="margin-top:1.25rem">Policy receipt</div>${policyChecks(task.policy)}</div>` : ''}<div class="timeline-wrap"><div class="audit-header"><div><div class="panel-label">Run timeline</div><h3>Backend-owned progress</h3></div><p>Each transition is persisted before the next begins.</p></div>${runTimeline(task)}</div><div class="audit"><div class="audit-header"><div><div class="panel-label">Append-only audit timeline</div><h3>Redacted evidence trail</h3></div><p>${state.audit.length} events · no sensitive payment material</p></div><ol class="audit-list">${state.audit.slice().reverse().map((event) => `<li class="audit-event event-${escapeHtml(event.status)}"><span class="event-dot"></span><span><div class="audit-summary">${escapeHtml(event.summary)}</div><div class="audit-type">${escapeHtml(event.type)}</div></span><time class="audit-time">${formatDate(event.occurredAt)}</time></li>`).join('')}</ol></div></article>`;
+function auditPanel(task) {
+  return `<section class="panel audit-panel"><div class="panel-heading"><div><span class="overline">Audit evidence</span><h2>Redacted activity trail</h2></div><span class="event-count">${state.audit.length} events</span></div><p class="muted">Append-only records show each boundary and correlated reference. No credentials or raw provider payloads are sent to this browser.</p><ol class="audit-list">${state.audit.slice().reverse().map((event) => `<li class="audit-event ${stateClass(event.status)}"><span class="audit-dot"></span><span><strong>${escapeHtml(event.summary)}</strong><small>${escapeHtml(event.type)}${event.reference ? ` · ${escapeHtml(shortId(event.reference))}` : ''}</small></span><time>${formatDate(event.occurredAt)}</time></li>`).join('')}</ol></section>`;
 }
 
-function guardrails(task) {
-  const lockedTotal = task.quote?.lockedSnapshot?.totalMinor || 0;
-  const ceiling = task.spendingCeilingMinor;
-  const percentage = Math.min(100, Math.round((lockedTotal / ceiling) * 100));
-  return `<aside class="guardrail-stack"><article class="card guardrail-card"><div class="panel-label">Server guardrails</div><h2>Bounded by design</h2><ul class="guardrail-list"><li><span>Immutable ${formatMoney(ceiling, task.currency)} ceiling</span></li><li><span>Exact merchant and quote scope</span></li><li><span>One successful capture maximum</span></li><li><span>Unknown results require reconciliation</span></li><li><span>Audit entries are redacted and append-only</span></li></ul><div class="ceiling-meter"><div class="ceiling-meter-head"><span>Locked quote / ceiling</span><strong>${formatMoney(lockedTotal, task.currency)} / ${formatMoney(ceiling, task.currency)}</strong></div><div class="meter-track" role="progressbar" aria-label="Locked quote against task ceiling" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percentage}"><div class="meter-fill${lockedTotal > ceiling ? ' over' : ''}" style="width:${Math.max(lockedTotal ? 3 : 0, percentage)}%"></div></div></div></article><article class="card guardrail-card"><div class="panel-label">Mode disclosure</div><h2>What is simulated</h2><ul class="guardrail-list"><li><span>Funding verifier: Avalanche fixture</span></li><li><span>Discovery: local catalog fixture</span></li><li><span>Issuer: mock scoped instrument</span></li><li><span>Checkout: mock merchant</span></li></ul></article><article class="card guardrail-card scenario-card"><div class="panel-label">Judge scenarios</div><h2>Replay a known path</h2><p>Choose an isolated deterministic run. Reset clears the local store and seeds a fresh happy path.</p><label class="select-label" for="scenario-select">Scenario</label><select class="scenario-select" id="scenario-select">${scenarioOptions(task.scenario)}</select><div class="action-row">${actionButton('Start selected scenario', 'new-run', 'button-secondary')}<button type="button" class="button button-secondary" data-action="reset-demo"${state.busy ? ' disabled' : ''}>Reset local demo</button></div></article></aside>`;
+function outcome(task) {
+  if (task.state === 'completed') {
+    const deliveryNote = task.delivery?.status === 'failed' ? ' Delivery failed independently, but confirmed payment and order remain confirmed.' : '';
+    return `<div class="outcome-banner success"><div class="outcome-icon">✓</div><div><strong>Purchase and order confirmed</strong><p>${escapeHtml(task.quote?.item || 'Item')} is confirmed in the simulated merchant sandbox.${escapeHtml(deliveryNote)}</p></div></div>`;
+  }
+  if (task.state === 'reconciliation_required') return `<div class="outcome-banner warning"><div class="outcome-icon">?</div><div><strong>Payment needs reconciliation</strong><p>The fake wallet returned an unknown result. No retry or duplicate debit is allowed. Use the API reconciliation contract to resolve it.</p></div></div>`;
+  if (task.state === 'failed') return `<div class="outcome-banner danger"><div class="outcome-icon">!</div><div><strong>Run stopped safely</strong><p>${escapeHtml(task.failure?.message || 'No side effect was completed.')}</p>${task.compensation ? `<small>Compensation: ${escapeHtml(task.compensation.status)}</small>` : ''}</div></div>`;
+  return '';
 }
 
-function stagePanel(task) {
-  const stage = currentStage(task);
-  if (stage === 0) return taskBrief(task);
-  if (stage === 1) return fundingPanel(task);
-  if (stage === 2) return quoteCard(task);
-  if (stage === 3) return issuancePanel(task);
-  if (stage === 4) return executionPanel(task);
-  return outcomePanel(task);
+function historyPanel() {
+  if (!state.tasks.length) return '';
+  return `<section class="history"><div class="section-heading"><div><span class="overline">Local history</span><h2>Previous purchase runs</h2></div><span class="event-count">${state.tasks.length} saved</span></div><div class="history-grid">${state.tasks.map((task) => `<button type="button" class="history-item${task.id === state.task?.id ? ' current' : ''}" data-task-id="${escapeHtml(task.id)}"><span><strong>${escapeHtml(task.request.raw)}</strong><small>${escapeHtml(task.quote?.item || 'No recommendation yet')}</small></span><span>${statusPill(task.state)}<small>${formatDate(task.updatedAt)}</small></span></button>`).join('')}</div></section>`;
+}
+
+function emptyState() {
+  return `<section class="empty-start"><div class="empty-orbit"><span>⌁</span></div><span class="overline">Ready for a local run</span><h2>What would you like to buy?</h2><p>Type a plain request and NaviPay will interpret it, find a stocked local item, reserve it, pay from the seeded fake wallet, create the order, and simulate delivery.</p><div class="example-row"><span>I want a keyboard</span><span>I want a mouse</span><span>I want earphones</span></div></section>`;
+}
+
+function workspace() {
+  return `<section class="request-card"><div><span class="overline">New purchase</span><h1>Buy something with NaviPay</h1><p>One normal run. No stage buttons. The sandbox handles discovery, stock, payment, order, fulfillment, delivery, receipt, and audit automatically.</p></div><form id="request-form" novalidate><label for="request-input">Your request</label><div class="request-row"><input id="request-input" name="request" type="text" maxlength="240" autocomplete="off" placeholder="I want a keyboard" required><button type="submit" class="run-button"${state.busy ? ' disabled' : ''}>${state.busy ? 'Running…' : 'Run purchase'}</button></div><small>Try “I want a mouse” or “I want earphones”. Products, payment, customer, and delivery are simulated.</small><p class="form-error" id="request-error" role="alert" hidden></p></form></section>`;
 }
 
 function render() {
-  if (!state.task) return;
   const task = state.task;
   app.setAttribute('aria-busy', state.busy ? 'true' : 'false');
-  app.innerHTML = `${workspace(task)}${hero(task)}${notice()}${state.error ? `<div class="error-banner" id="action-error" tabindex="-1" role="alert"><strong>${escapeHtml(state.error.code || 'Action unavailable')}</strong><p>${escapeHtml(state.error.message)}</p></div>` : ''}${stageRail(task)}<div class="console-grid"><div>${stagePanel(task)}${currentStage(task) < 5 ? auditPanel(task) : ''}<p class="footer-note">NaviPay demo mode · local-only fixture · credentials and sensitive payment data stay outside the operator console.</p></div>${guardrails(task)}</div>`;
+  if (!task) {
+    app.innerHTML = `${workspace()}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
+    bindEvents();
+    return;
+  }
+  app.innerHTML = `${workspace()}${state.error ? `<div class="error-banner" role="alert"><strong>${escapeHtml(state.error.code || 'Run stopped')}</strong><span>${escapeHtml(state.error.message)}</span></div>` : ''}${outcome(task)}<div class="run-heading"><div><span class="overline">Current run</span><h2>${escapeHtml(task.request.raw)}</h2></div>${modeBadge('ALL LOCAL FIXTURES')}</div><div class="dashboard"><div class="dashboard-main">${intentPanel(task)}${recommendationPanel(task)}${progressPanel(task)}${statusPanel(task)}${receiptPanel(task)}</div><aside class="dashboard-side">${walletPanel(task)}${customerPanel(task)}</aside></div>${auditPanel(task)}${historyPanel()}<p class="footer-note">NaviPay is a local-only product sandbox. Replaceable adapter boundaries are kept on the server; this browser receives normalized status and redacted evidence only.</p>`;
   bindEvents();
 }
 
@@ -309,7 +131,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(payload.error?.message || 'The request could not be completed.');
+    const error = new Error(payload.error?.message || 'The sandbox could not complete that request.');
     error.code = payload.error?.code;
     error.payload = payload;
     throw error;
@@ -317,272 +139,92 @@ async function api(path, options = {}) {
   return payload;
 }
 
-async function refreshAudit() {
-  const payload = await api(`/api/tasks/${encodeURIComponent(state.task.id)}/audit`);
-  state.audit = payload.events || [];
-}
-
-async function refreshTasks() {
+async function refresh() {
   const payload = await api('/api/tasks');
   state.tasks = payload.tasks || [];
-  const current = state.tasks.find((task) => task.id === state.task?.id);
-  if (current) state.task = current;
+  state.wallet = payload.wallet || null;
+  if (state.task) {
+    const current = state.tasks.find((task) => task.id === state.task.id);
+    if (current) state.task = current;
+  }
+  if (state.task) {
+    const audit = await api(`/api/tasks/${encodeURIComponent(state.task.id)}/audit`);
+    state.audit = audit.events || [];
+  }
 }
 
-function showTaskFormError(message) {
-  const error = document.querySelector('#task-form-error');
-  if (!error) return;
-  error.textContent = message;
-  error.hidden = !message;
+function runKey() {
+  return `browser-${window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 }
 
-function showRequestFormError(message) {
-  const error = document.querySelector('#request-form-error');
-  if (!error) return;
-  error.textContent = message;
-  error.hidden = !message;
-}
-
-function newRunKey() {
-  return `console-run-${window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-}
-
-async function absorbTaskError(error) {
-  if (!error.payload?.task) return;
-  state.task = error.payload.task;
-  await refreshTasks().catch(() => {});
-  await refreshAudit().catch(() => {});
-}
-
-async function createRequestTask(event) {
+async function runPurchase(event) {
   event.preventDefault();
-  showRequestFormError('');
   const form = event.currentTarget;
   const request = form.elements.request.value.trim();
-  if (!request || request.length > 240 || /[\u0000-\u001f\u007f]/.test(request)) return showRequestFormError('Enter a plain-language request between 1 and 240 characters.');
+  const errorNode = document.querySelector('#request-error');
+  if (!request) {
+    errorNode.textContent = 'Enter a plain-language request first.';
+    errorNode.hidden = false;
+    return;
+  }
   state.busy = true;
   state.error = null;
   render();
   try {
-    const payload = await api('/api/purchases/run', { method: 'POST', headers: { 'Idempotency-Key': newRunKey() }, body: JSON.stringify({ request }) });
+    const payload = await api('/api/purchases/run', { method: 'POST', headers: { 'Idempotency-Key': runKey() }, body: JSON.stringify({ request }) });
     state.task = payload.task;
-    state.selectedCandidate = null;
-    await refreshTasks();
-    await refreshAudit();
+    await refresh();
     form.reset();
-  } catch (error) {
-    await absorbTaskError(error);
-    state.error = { code: error.code, message: error.message };
-  } finally {
-    state.busy = false;
-    render();
-    focusAfterAction();
-  }
-}
-
-async function createPurchaseTask(event) {
-  event.preventDefault();
-  showTaskFormError('');
-  const form = event.currentTarget;
-  const merchant = form.elements.merchant.value.trim();
-  const item = form.elements.item.value.trim();
-  const amount = form.elements.amount.value.trim();
-  const amountMinor = parseAmountMinor(amount);
-  if (!merchant || merchant.length > 120 || /[\u0000-\u001f\u007f]/.test(merchant)) return showTaskFormError('Enter a merchant name between 1 and 120 characters.');
-  if (!item || item.length > 180 || /[\u0000-\u001f\u007f]/.test(item)) return showTaskFormError('Enter an item between 1 and 180 characters.');
-  if (!amountMinor) return showTaskFormError('Enter a positive XSGD amount with at most two decimal places.');
-  if (amountMinor > TASK_CEILING_MINOR) return showTaskFormError(`Amount cannot exceed ${formatMoney(TASK_CEILING_MINOR)}.`);
-  state.busy = true;
-  state.error = null;
-  render();
-  try {
-    const payload = await api('/api/purchases/run', { method: 'POST', headers: { 'Idempotency-Key': newRunKey() }, body: JSON.stringify({ merchant, item, amount }) });
-    state.task = payload.task;
-    state.selectedCandidate = null;
-    await refreshTasks();
-    await refreshAudit();
-    form.reset();
-  } catch (error) {
-    await absorbTaskError(error);
-    state.error = { code: error.code, message: error.message };
-  } finally {
-    state.busy = false;
-    render();
-    focusAfterAction();
-  }
-}
-
-async function selectTask(taskId) {
-  if (state.busy || taskId === state.task?.id) return;
-  const task = state.tasks.find((item) => item.id === taskId);
-  if (!task) return;
-  state.busy = true;
-  state.error = null;
-  state.task = task;
-  state.selectedCandidate = null;
-  render();
-  try {
-    await refreshAudit();
-  } catch (error) {
-    state.error = { code: error.code, message: error.message };
-  } finally {
-    state.busy = false;
-    render();
-    focusAfterAction();
-  }
-}
-
-async function perform(action, path, body = {}) {
-  state.busy = true;
-  state.error = null;
-  render();
-  try {
-    const payload = await api(path, {
-      method: 'POST',
-      headers: { 'Idempotency-Key': `console-${state.task.id}-${action}` },
-      body: JSON.stringify(body)
-    });
-    if (payload.task) state.task = payload.task;
-    await refreshTasks();
-    await refreshAudit();
   } catch (error) {
     if (error.payload?.task) {
       state.task = error.payload.task;
-      await refreshTasks().catch(() => {});
-      await refreshAudit().catch(() => {});
+      await refresh().catch(() => {});
     }
     state.error = { code: error.code, message: error.message };
   } finally {
     state.busy = false;
     render();
-    focusAfterAction();
+    document.querySelector('#page-title')?.focus?.({ preventScroll: true });
   }
 }
 
-async function startNewRun(scenario) {
+async function selectTask(taskId) {
+  if (state.busy || taskId === state.task?.id) return;
   state.busy = true;
   state.error = null;
-  render();
   try {
-    const payload = await api('/api/purchases/run', { method: 'POST', headers: { 'Idempotency-Key': newRunKey() }, body: JSON.stringify({ scenario }) });
-    state.task = payload.task;
-    state.selectedCandidate = null;
-    await refreshTasks();
-    await refreshAudit();
-  } catch (error) {
-    await absorbTaskError(error);
-    state.error = { code: error.code, message: error.message };
-  } finally {
-    state.busy = false;
-    render();
-    focusAfterAction();
-  }
-}
-
-async function resetDemo() {
-  if (!window.confirm('Reset local demo? This intentionally clears persisted tasks and audit history, then seeds one fresh task.')) return;
-  state.busy = true;
-  state.error = null;
-  render();
-  try {
-    const payload = await api('/api/reset', { method: 'POST', body: '{}' });
-    state.task = payload.task;
-    state.selectedCandidate = null;
-    await refreshTasks();
-    await refreshAudit();
+    state.task = (await api(`/api/tasks/${encodeURIComponent(taskId)}`)).task;
+    const audit = await api(`/api/tasks/${encodeURIComponent(taskId)}/audit`);
+    state.audit = audit.events || [];
+    await refresh();
   } catch (error) {
     state.error = { code: error.code, message: error.message };
   } finally {
     state.busy = false;
     render();
-    focusAfterAction();
+    window.scrollTo({ top: 0, behavior: 'auto' });
   }
-}
-
-async function safelyReplayTask() {
-  state.busy = true;
-  state.error = null;
-  render();
-  try {
-    const id = state.task.id;
-    const payload = await api(`/api/tasks/${encodeURIComponent(id)}/replay`, {
-      method: 'POST',
-      headers: { 'Idempotency-Key': `console-${id}-replay` },
-      body: '{}'
-    });
-    state.task = payload.task;
-    state.selectedCandidate = null;
-    await refreshTasks();
-    await refreshAudit();
-  } catch (error) {
-    if (error.payload?.task) state.task = error.payload.task;
-    state.error = { code: error.code, message: error.message };
-  } finally {
-    state.busy = false;
-    render();
-    focusAfterAction();
-  }
-}
-
-function focusAfterAction() {
-  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
-  const target = document.querySelector('#action-error') || document.querySelector('#page-title');
-  target?.focus?.({ preventScroll: true });
-}
-
-function alignStageRail() {
-  const rail = document.querySelector('.stage-rail');
-  const current = rail?.querySelector('[aria-current="step"]');
-  if (!rail || !current || rail.scrollWidth <= rail.clientWidth) return;
-  rail.scrollLeft = Math.max(0, current.offsetLeft - (rail.clientWidth - current.offsetWidth));
 }
 
 function bindEvents() {
-  document.querySelector('#request-form')?.addEventListener('submit', createRequestTask);
-  document.querySelector('#task-form')?.addEventListener('submit', createPurchaseTask);
+  document.querySelector('#request-form')?.addEventListener('submit', runPurchase);
   document.querySelectorAll('[data-task-id]').forEach((button) => button.addEventListener('click', () => selectTask(button.dataset.taskId)));
-  document.querySelectorAll('[data-candidate]').forEach((radio) => radio.addEventListener('change', (event) => {
-    state.selectedCandidate = event.target.value;
-    render();
-  }));
-  document.querySelectorAll('[data-action]').forEach((button) => button.addEventListener('click', () => {
-    const action = button.dataset.action;
-    const id = state.task.id;
-    if (action === 'open-task') return perform(action, `/api/tasks/${id}/open`);
-    if (action === 'verify-funding') return perform(action, `/api/tasks/${id}/funding/verify`);
-    if (action === 'go-discovery') return perform(action, `/api/tasks/${id}/discovery`);
-    if (action === 'discover') return perform(action, `/api/tasks/${id}/discovery`);
-    if (action === 'lock-quote') return perform(action, `/api/tasks/${id}/${state.task.automation?.status === 'awaiting_selection' ? 'run' : 'quote/lock'}`, { candidateId: state.selectedCandidate || state.task.quote.recommendedCandidateId });
-    if (action === 'approve-policy') return perform(action, `/api/tasks/${id}/policy/approve`);
-    if (action === 'issue-instrument') return perform(action, `/api/tasks/${id}/instrument/issue`);
-    if (action === 'go-execution') return perform(action, `/api/tasks/${id}/instrument/issue`);
-    if (action === 'execute-checkout') return perform(action, `/api/tasks/${id}/checkout/execute`);
-    if (action === 'reconcile-authorized') return perform(action, `/api/tasks/${id}/checkout/reconcile`, { resolution: 'authorized' });
-    if (action === 'reconcile-declined') return perform(action, `/api/tasks/${id}/checkout/reconcile`, { resolution: 'declined' });
-    if (action === 'replay-task') return safelyReplayTask();
-    if (action === 'new-run') return startNewRun(document.querySelector('#scenario-select')?.value || 'happy');
-    if (action === 'reset-demo') return resetDemo();
-  }));
-  document.querySelector('#new-run')?.addEventListener('click', () => startNewRun(document.querySelector('#scenario-select')?.value || 'happy'));
-  alignStageRail();
 }
 
 async function boot() {
   try {
     const payload = await api('/api/tasks');
     state.tasks = payload.tasks || [];
-    state.task = state.tasks[0];
-    if (!state.task) {
-      const created = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ scenario: 'happy' }) });
-      state.task = created.task;
-      state.tasks = [created.task];
+    state.wallet = payload.wallet || null;
+    state.task = state.tasks[0] || null;
+    if (state.task) {
+      const audit = await api(`/api/tasks/${encodeURIComponent(state.task.id)}/audit`);
+      state.audit = audit.events || [];
     }
-    await refreshAudit();
     render();
   } catch (error) {
-    app.innerHTML = `<section class="error-banner" role="alert"><strong>Unable to load NaviPay</strong><p>${escapeHtml(error.message)} Start the local server with <code>npm start</code> and reload.</p></section>`;
+    app.innerHTML = `<div class="error-banner" role="alert"><strong>Unable to load NaviPay</strong><span>${escapeHtml(error.message)} Start the local server with <code>npm start</code> and reload.</span></div>`;
   }
 }
 
-window.addEventListener('resize', alignStageRail);
 boot();

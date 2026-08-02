@@ -1,32 +1,66 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const CURRENT_VERSION = 2;
+
 function emptyState() {
   return {
-    version: 1,
+    version: CURRENT_VERSION,
     tasks: {},
     auditEvents: [],
-    idempotency: {}
+    idempotency: {},
+    operations: {},
+    wallets: {},
+    walletLedger: [],
+    walletTransfers: {},
+    merchantBalances: {},
+    merchantCredits: {},
+    inventory: {},
+    reservations: {},
+    orders: {},
+    deliveries: {}
   };
 }
 
-function validateState(value, filePath = 'store') {
+function ensureCollection(state, key, kind) {
+  if (state[key] === undefined) state[key] = kind === 'array' ? [] : {};
+  if (kind === 'array' && !Array.isArray(state[key])) throw new Error(`NaviPay data has an invalid ${key}.`);
+  if (kind === 'object' && (!state[key] || typeof state[key] !== 'object' || Array.isArray(state[key]))) throw new Error(`NaviPay data has an invalid ${key} index.`);
+}
+
+function migrateState(value, filePath = 'store') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`NaviPay data at ${filePath} must be a JSON object.`);
   }
-  if (value.version !== 1) {
+  if (value.version === 1) {
+    return {
+      ...emptyState(),
+      ...value,
+      version: CURRENT_VERSION
+    };
+  }
+  if (value.version !== CURRENT_VERSION) {
     throw new Error(`Unsupported NaviPay data version at ${filePath}.`);
   }
-  if (!value.tasks || typeof value.tasks !== 'object' || Array.isArray(value.tasks)) {
-    throw new Error(`NaviPay data at ${filePath} has an invalid task index.`);
-  }
-  if (!Array.isArray(value.auditEvents)) {
-    throw new Error(`NaviPay data at ${filePath} has an invalid audit timeline.`);
-  }
-  if (!value.idempotency || typeof value.idempotency !== 'object' || Array.isArray(value.idempotency)) {
-    throw new Error(`NaviPay data at ${filePath} has an invalid idempotency index.`);
-  }
   return value;
+}
+
+function validateState(value, filePath = 'store') {
+  const state = migrateState(value, filePath);
+  ensureCollection(state, 'tasks', 'object');
+  ensureCollection(state, 'auditEvents', 'array');
+  ensureCollection(state, 'idempotency', 'object');
+  ensureCollection(state, 'operations', 'object');
+  ensureCollection(state, 'wallets', 'object');
+  ensureCollection(state, 'walletLedger', 'array');
+  ensureCollection(state, 'walletTransfers', 'object');
+  ensureCollection(state, 'merchantBalances', 'object');
+  ensureCollection(state, 'merchantCredits', 'object');
+  ensureCollection(state, 'inventory', 'object');
+  ensureCollection(state, 'reservations', 'object');
+  ensureCollection(state, 'orders', 'object');
+  ensureCollection(state, 'deliveries', 'object');
+  return state;
 }
 
 class MemoryStore {
@@ -55,6 +89,7 @@ class JsonStore extends MemoryStore {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
       this.data = validateState(parsed, this.filePath);
+      if (parsed.version !== this.data.version) this.save();
     } catch (error) {
       if (error.code === 'ENOENT') {
         this.data = emptyState();
@@ -93,4 +128,4 @@ class JsonStore extends MemoryStore {
   }
 }
 
-module.exports = { JsonStore, MemoryStore, emptyState, validateState };
+module.exports = { CURRENT_VERSION, JsonStore, MemoryStore, emptyState, migrateState, validateState };

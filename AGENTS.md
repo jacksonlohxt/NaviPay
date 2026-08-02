@@ -11,9 +11,10 @@ Do not repeat what the codebase already shows; point to the authoritative file o
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
 
-## NaviPay local MVP
+## NaviPay local sandbox
 
-- Run the single-host demo with `npm start`; the server entrypoint and API routes are authoritative in `src/server.js`.
-- Run `npm test` for lifecycle and policy coverage, and `npm run check` for syntax validation.
-- The default path is deterministic mock mode. Domain invariants and replaceable adapter contracts live in `src/domain.js` and `src/adapters.js`.
-- The primary end-to-end browser contract is `POST /api/purchases/run`; `POST /api/tasks/:id/run` resumes a persisted run that needs candidate selection. Receipts are persisted on the task and exposed at `/api/tasks/:id/receipt`.
+- Run the single-host product with `npm start`; the server entrypoint and API routes are authoritative in `src/server.js`.
+- Run `npm test` for lifecycle, ledger, inventory, recovery, persistence, and HTTP coverage, and `npm run check` for syntax validation.
+- The product orchestration, seeded merchant catalog, fake wallet ledger, inventory leases, order, fulfillment, delivery, receipt, audit, and replaceable adapter contracts live in `src/sandbox.js`. The earlier control-plane contract remains in `src/domain.js` for compatibility tests.
+- The primary browser contract is `POST /api/purchases/run`; `POST /api/tasks/:id/run` resumes a persisted run that needs candidate selection, and `POST /api/tasks/:id/payment/reconcile` resolves an unknown fake-wallet result without retrying it. Receipts are persisted on the task and exposed at `/api/tasks/:id/receipt`.
+- `src/store.js` migrates version 1 local JSON state to the current version 2 shape. Use `POST /api/reset` or a separate `NAVIPAY_DATA_FILE` when testing a clean wallet and inventory fixture.

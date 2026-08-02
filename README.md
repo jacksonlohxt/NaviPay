@@ -1,6 +1,8 @@
 # NaviPay
 
-NaviPay is a local-only, mock-first purchase control plane. It accepts a natural shopping request, ranks a deterministic local catalog, and demonstrates one bounded XSGD purchase from funding evidence through a task-scoped instrument, one checkout, and a redacted audit timeline.
+NaviPay is a local-only commerce sandbox. A user enters a plain request such as `I want a keyboard`, `I want a mouse`, or `I want earphones`, then presses **Run purchase**. The server interprets the intent, finds an in-stock fixture from the seeded merchant catalog, reserves one unit, checks and debits a seeded fake XSGD wallet, credits the fake merchant, creates an order, simulates fulfillment and delivery, and returns a confirmed receipt plus redacted audit evidence.
+
+Everything in this repository is simulated. No real money, wallet keys, merchant credentials, inventory, customer identity, or delivery network is used.
 
 ## Run locally
 
@@ -11,72 +13,64 @@ npm install
 npm start
 ```
 
-Open <http://127.0.0.1:3000>. The app seeds a fresh happy-path task when the local store is empty. It needs no provider credentials, RPC access, merchant account, or external service.
-
-The local JSON store is written to `.data/navipay.json` with an atomic, permission-restricted replacement. Set `NAVIPAY_DATA_FILE` to use another location. **Reset local demo** is an explicit destructive control: it clears local tasks and audit history, then seeds one new happy path. A safe replay creates a separate task and preserves the original record.
-
-## Natural request discovery
-
-Enter **I want Apple earphones** in the purchase-request field. NaviPay deterministically normalizes the text into the brand `Apple`, product category `earphones`, and keywords `apple` and `earphones`. The mock discovery adapter ranks seeded examples such as Apple AirPods 4, Apple AirPods Pro 2, Sony WF-C700N, Samsung Galaxy Buds3, Soundcore Liberty 4 NC, and Bose QuietComfort Ultra Earbuds. Each candidate includes its merchant, item, variant, XSGD total, availability, relevance explanation, expiry, and local-catalog evidence.
-
-This catalog is deliberately small and local. It is not a live marketplace, does not check real inventory, and does not scrape arbitrary websites. Results carry a `DEMO / MOCK` disclosure and are only quote candidates. A clear in-budget recommendation is selected by the server and locked automatically; an ambiguous or over-cap run pauses with the ranked candidates visible so the operator can choose before lock. The server then owns policy, issuance, checkout, receipt, persistence, and redacted audit transitions as one run.
-
-The replaceable discovery boundary is `MockDiscoveryAdapter` in `src/adapters.js`. A future approved live source can implement the same adapter contract and normalize its response there, while keeping credentials inside the provider process and preserving the server-side quote lock, cap, policy, scoped instrument, idempotency, and reconciliation safeguards. The local adapter remains the default.
-
-## Fresh-start product walkthrough
-
-1. Start with `npm start`, then open the operator workspace. The persistent task list shows the current run and prior outcomes after refresh or server restart.
-2. Enter **I want Apple earphones**, then choose **Create request task**. The browser calls `POST /api/purchases/run`; the backend stores the raw request and parsed intent, verifies funding, discovers and ranks local candidates, auto-selects Apple AirPods 4, locks the quote, passes policy, issues one scoped mock authority, executes one checkout, and returns a persisted receipt.
-3. The page shows the interpreted intent, selected recommendation, exact quote, backend-owned progress timeline, final receipt, history entry, and redacted audit evidence. There are no Continue buttons for the happy path.
-4. If a request is genuinely ambiguous, or a quote exceeds the immutable ceiling, the run pauses at ranked candidates. Choose a candidate and **Confirm selection and finish run**; the server resumes the same bounded lifecycle. An unknown checkout instead stops for explicit reconciliation and is never retried.
-5. At any point, inspect the separate on-chain evidence and card-spendable settlement fields. The latter is a mock issuer-ledger fact and is never inferred from the chain observation.
-6. Use **Safely replay as new task** only for a completed or safely stopped task. An unresolved unknown checkout cannot be replayed. Use **Reset local demo** only when you intentionally want to discard this local history.
-
-## Competition demo script
-
-The console is designed for a short, reliable presentation:
-
-1. Start with the seeded task or enter **I want Apple earphones**. Point out the single task authority, XSGD currency, immutable XSGD 1,000 ceiling, and visible `DEMO / MOCK PROVIDERS` disclosure.
-2. Submit the request once. The backend-driven run completes the happy path without lifecycle clicks. Show the interpreted intent, Apple AirPods 4 recommendation, progress timeline, receipt, and append-only redacted audit.
-3. Select a Judge scenario only when demonstrating an exception. Unknown checkout presents reconciliation choices; over-cap and ambiguous runs present candidates before lock; funding, discovery, issuer, and merchant errors stop safely.
-4. Use **Reset local demo** to return to a known local state before another presentation.
-
-Every consequential transition is backed by the JSON API and persisted locally. Refreshing the page or restarting the server keeps the current run. Repeating an action with the same idempotency key replays the stored result without calling an adapter twice.
-
-## Scenario walkthrough
-
-The Judge scenarios selector creates isolated deterministic runs. All scenarios are credential-free:
-
-- **Happy path**: funding verified, quote locked, policy approved, scoped authority issued, checkout authorized and captured.
-- **Over-cap policy failure**: a XSGD 1,250 quote is locked and declined by server policy before issuance. The ceiling cannot be bypassed in the UI or API.
-- **Unknown checkout / reconcile**: checkout returns no definitive result. NaviPay marks the authority pending reconciliation and blocks replay. Resolve it as authorized or declined; neither choice retries checkout.
-- **Merchant decline**: the mock merchant declines once. The task is terminal, the authority is retired, and no retry is offered.
-- **Issuer failure**: the issuer adapter fails after policy approval. No instrument is exposed and the task stops with an audit event.
-- **Funding verifier failure**: the funding adapter fails before discovery.
-- **Discovery failure**: funding succeeds, then the catalog adapter fails before a quote exists.
-
-## Test and validate
+Open <http://127.0.0.1:3000>. The app starts with an empty purchase history and a seeded fake wallet. Enter one of the example requests and run it. State is persisted in `.data/navipay.json`; set `NAVIPAY_DATA_FILE` to use another local file.
 
 ```sh
 npm test
 npm run check
 ```
 
-The focused tests cover deterministic request parsing and catalog ranking, the one-call Apple request-to-receipt orchestration, automatic selection, ambiguity and over-cap pauses, quote locking, receipt and audit persistence after reload, idempotency, all deterministic failure and reconciliation paths, scoped checkout-result validation, reset behavior, and persistent store recovery boundaries. The browser console uses the same `POST /api/purchases/run` contract rather than faking lifecycle progress.
+## Product walkthrough
 
-## Architecture and extension points
+1. Open the operator console and enter a plain request in the single request field.
+2. Press **Run purchase** once. There are no stage-by-stage controls on the happy path.
+3. Review the interpreted brand, category, and keywords; the recommended item; merchant, SKU and variant evidence; exact XSGD quote; and stock reservation.
+4. Watch the server-owned progress record advance through intent, discovery, quote, inventory, wallet payment, merchant credit, order, fulfillment, delivery, receipt, and audit.
+5. Confirm the separate fake wallet balance. The wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00. The UI also shows a separate simulated chain observation; it is evidence, not the spendable balance.
+6. Review the fixture delivery address, order and delivery statuses, confirmed receipt, operation references, and append-only redacted audit evidence.
 
-- `src/domain.js` owns the server-side six-stage state machine, the `startPurchase` / `orchestrateTask` bounded run, policy checks, idempotency records, quote recommendation and lock, one-use instrument invariant, receipt, reconciliation, and audit events.
-- `src/adapters.js` defines deterministic request parsing, local-catalog ranking, and replaceable funding, discovery, issuer, and checkout contracts. The default adapters return local fixtures and never need credentials. The discovery contract receives either a normalized natural request intent or the preserved direct task purchase and returns candidates; the issuer and checkout contracts receive only the locked scope.
-- `POST /api/purchases/run` is the browser integration boundary. `POST /api/tasks/:id/run` resumes an ambiguous or over-cap task after an explicit candidate choice. Both are idempotent and return the persisted task plus run status.
-- `src/store.js` provides the single-host persistent store, atomic writes, reset behavior, and state-shape validation. No database service is required for this MVP.
-- `src/server.js` serves the JSON API and static operator console from one origin. The API is the integration boundary for a future brief.
-- `public/` contains the responsive six-stage operator experience: entry, funding, discovery and quote lock, issuance, execution, and outcome/audit.
+The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`.
 
-When the official competition requirements arrive, replace the narrowest adapter implementation rather than the workspace or state machine. Implement the funding verifier, discovery provider, issuer, and checkout provider behind the contracts in `src/adapters.js`, normalize external responses at that boundary, and keep credentials inside the provider adapter process. Update the task brief and candidate normalization only where the official contract requires it. Keep policy decisions in `src/domain.js`, and preserve the task ceiling, exact quote lock, one-checkout rule, reconciliation stop, and redacted audit output until the new brief explicitly changes them. Live integrations should be opt-in and credentialed; mock mode remains the safe local default.
+## Local fake environments
 
-The operator console never receives sensitive payment credentials, wallet keys, identity documents, or model transcripts. Funding evidence and card-spendable settlement remain separate fields and separate audit facts.
+- **Merchant catalog**: `CATALOG` in `src/sandbox.js` contains merchant IDs, local merchant domains, SKUs, variant IDs, prices, tax and shipping, quantities, and product categories for keyboards, mice, and earphones.
+- **Inventory**: `LocalInventoryAdapter` supports one-unit stock leases with expiry, reserve, commit, release, out-of-stock handling, and idempotent operation references. Reservation happens before any wallet debit.
+- **Wallet**: `LocalWalletTransferAdapter` operates on the seeded wallet and writes an atomic double-entry ledger. A transfer has a wallet debit and merchant credit leg, a stable operation reference, replay lookup, insufficient-funds handling, decline handling, unknown-result handling, and compensation support. The wallet balance is the spendable source. It is not inferred from chain evidence.
+- **Merchant credit**: `LocalMerchantCreditAdapter` confirms that the ledger credit reached the selected merchant before order creation.
+- **Order**: `LocalOrderAdapter` creates an idempotent order only after confirmed payment and committed inventory.
+- **Fulfillment and delivery**: `LocalFulfillmentAdapter` and `LocalDeliveryAdapter` write independent statuses. A delivery failure leaves the confirmed payment, merchant credit, order, and receipt confirmed.
 
-## Deliberate MVP boundary
+All adapter responses are normalized server-side. The browser receives status, references, and safe evidence only, never raw provider payloads or credentials.
 
-This slice does not include social login, consumer wallet features, a generic marketplace, reviews, subscriptions, generalized shopping, multi-task queues, policy editing, production custody, production KYC, or live provider integrations. Live adapters can be added behind the discovery contract after an approved source is available, without changing the domain lifecycle.
+## API boundary
+
+- `POST /api/purchases/run` with `{ "request": "I want a mouse" }` runs the complete bounded lifecycle. Send an `Idempotency-Key` header.
+- `POST /api/tasks/:id/run` resumes a run waiting for an explicit candidate selection.
+- `POST /api/tasks/:id/payment/reconcile` with `{ "resolution": "authorized" }` or `{ "resolution": "declined" }` resolves an unknown wallet result without retrying the transfer.
+- `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/receipt`, and `GET /api/tasks/:id/audit` expose persisted safe views.
+- `GET /api/wallet` exposes the seeded fake balance and ledger evidence. `GET /api/catalog` exposes safe catalog and stock facts.
+- `POST /api/reset` clears local purchase history and restores the seeded wallet and inventory.
+
+The server entrypoint is `src/server.js`. The product orchestration and adapter contracts are in `src/sandbox.js`. The JSON store is in `src/store.js`.
+
+## Recovery scenarios
+
+The server supports deterministic local scenarios for integration testing: `insufficient-funds`, `payment-decline`, `unknown-payment`, `order-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
+
+- Insufficient funds and payment decline release the reservation and create no ledger entries.
+- Unknown payment holds the reservation and blocks retries. Reconciliation either applies the one idempotent transfer or releases the reservation.
+- Merchant-credit and order failures compensate an already confirmed wallet transfer and release reserved stock. Compensation is itself a double-entry operation.
+- Delivery and fulfillment failures do not rewrite a confirmed payment or order as failed. Their independent statuses remain visible on the receipt and task.
+- Repeating an idempotency key replays the persisted response. Repeating an adapter operation uses its persisted operation, reservation, transfer, order, or delivery reference and does not duplicate side effects.
+
+## Persistence and compatibility
+
+`src/store.js` uses version 2 state with an explicit migration from the previous version 1 task/audit store. It persists tasks, progress, operations, wallet transfers, ledger legs, reservations, orders, delivery records, and idempotency responses. JSON writes use a restricted directory, a restricted temporary file, fsync, and atomic rename. A task can therefore be inspected and safely resumed after a process restart.
+
+## Future organizer adapters
+
+The local adapters are intentionally narrow replacement points. A future approved organizer integration can implement the canonical methods in `src/sandbox.js` for discovery, funding lookup, inventory reservation, wallet transfer, merchant credit, order, fulfillment, or delivery. Normalize provider status, timeout, and reference data inside that adapter, keep credentials in the provider process, and preserve the server-owned operation IDs, exact quote, inventory-before-payment invariant, idempotency, compensation, and redacted browser contract. The local fixtures remain the default until an approved provider contract and credentials exist.
+
+## Deliberate boundary
+
+This is one local operator and one modular Node application. It is not a generalized marketplace, social login system, production wallet, custody service, KYC system, real-money payment integration, live inventory feed, or multi-merchant consumer product.

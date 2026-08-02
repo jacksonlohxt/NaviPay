@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DomainError, NaviPayService } = require('./domain');
+const { NaviPaySandboxService, SandboxDomainError } = require('./sandbox');
 const { JsonStore } = require('./store');
 
 const root = path.resolve(__dirname, '..');
@@ -23,7 +24,7 @@ function json(res, statusCode, payload) {
 }
 
 function sendError(res, error) {
-  const statusCode = error instanceof DomainError ? error.statusCode : 500;
+  const statusCode = error instanceof DomainError || error instanceof SandboxDomainError ? error.statusCode : 500;
   json(res, statusCode, {
     error: {
       code: error.code || 'INTERNAL_ERROR',
@@ -54,12 +55,71 @@ function idempotencyKey(req, fallback) {
 }
 
 function makeService() {
-  const service = new NaviPayService({ store: new JsonStore(dataFile) });
-  service.ensureSeedTask();
-  return service;
+  return new NaviPaySandboxService({ store: new JsonStore(dataFile) });
+}
+
+function routeSandboxApi(service, req, res, url) {
+  const segments = url.pathname.split('/').filter(Boolean);
+  const method = req.method || 'GET';
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'reset' && method === 'POST') {
+    return readBody(req).then(() => json(res, 200, service.reset()));
+  }
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
+    return json(res, 200, { tasks: service.listTasks(), wallet: service.getWallet(), mode: 'simulated local sandbox' });
+  }
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
+    return readBody(req).then((body) => {
+      const input = body || {};
+      if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_TASK_REQUEST', 'Task request must be a JSON object.');
+      return json(res, 201, { task: service.createTask({ request: input.request, scenario: input.scenario || 'happy' }) });
+    });
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'purchases' && segments[2] === 'run' && method === 'POST') {
+    return readBody(req).then((body) => {
+      const input = body || {};
+      if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_PURCHASE_RUN', 'Purchase run input must be a JSON object.');
+      const fallback = `sandbox-browser-${crypto.createHash('sha256').update(JSON.stringify({ request: input.request, scenario: input.scenario || 'happy' })).digest('hex')}`;
+      const result = service.startPurchase({ idempotencyKey: idempotencyKey(req, fallback), request: input.request, scenario: input.scenario || 'happy', origin: input.origin || 'operator' });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'run' && method === 'POST') {
+    return readBody(req).then((body) => {
+      const input = body || {};
+      if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_PURCHASE_RUN', 'Purchase run input must be a JSON object.');
+      const result = service.resumePurchase(segments[2], idempotencyKey(req, `sandbox-resume-${segments[2]}-${input.candidateId || 'auto'}`), input.candidateId || null);
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
+    return json(res, 200, { task: service.getTask(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'audit' && method === 'GET') {
+    return json(res, 200, { events: service.getAudit(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'receipt' && method === 'GET') {
+    return json(res, 200, { receipt: service.getReceipt(segments[2]) });
+  }
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'wallet' && method === 'GET') {
+    return json(res, 200, { wallet: service.getWallet(), ledger: service.getWalletLedger() });
+  }
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'catalog' && method === 'GET') {
+    return json(res, 200, { catalog: service.getCatalog() });
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'operations' && method === 'GET') {
+    return json(res, 200, { operation: service.lookupOperation(segments[2]), walletTransfer: service.lookupWalletTransfer(segments[2]) });
+  }
+  if (segments.length === 5 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'payment' && segments[4] === 'reconcile' && method === 'POST') {
+    return readBody(req).then((body) => {
+      const result = service.reconcilePayment(segments[2], idempotencyKey(req, `sandbox-reconcile-${segments[2]}`), body?.resolution);
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  throw new SandboxDomainError(404, 'ROUTE_NOT_FOUND', 'API route not found.');
 }
 
 function routeApi(service, req, res, url) {
+  if (service.kind === 'sandbox') return routeSandboxApi(service, req, res, url);
   const segments = url.pathname.split('/').filter(Boolean);
   const method = req.method || 'GET';
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'reset' && method === 'POST') {
