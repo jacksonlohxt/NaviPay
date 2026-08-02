@@ -111,6 +111,41 @@ function validateDiscoveryResult(result, currency) {
   }
 }
 
+function quoteRecommendation(task, candidates, now) {
+  const candidate = candidates.find((item) => item.id === task.quote?.recommendedCandidateId) || candidates[0];
+  const intent = task.request?.intent;
+  const hasClearIntent = !task.request || Boolean(intent?.brand && intent?.productCategory);
+  const available = candidate && candidate.availability !== 'out_of_stock';
+  const unexpired = candidate && new Date(candidate.expiresAt).getTime() > now.getTime();
+  const inBudget = candidate && candidate.totalMinor <= task.spendingCeilingMinor;
+  let status = 'clear';
+  let reason = 'The highest-ranked available local candidate is within the task ceiling.';
+  let autoSelectable = true;
+  if (!hasClearIntent) {
+    status = 'ambiguous';
+    reason = 'The request does not identify both a brand and product category; choose the exact candidate before quote lock.';
+    autoSelectable = false;
+  } else if (!available) {
+    status = 'unavailable';
+    reason = 'The highest-ranked candidate is not currently available; choose an available candidate before quote lock.';
+    autoSelectable = false;
+  } else if (!unexpired) {
+    status = 'expired';
+    reason = 'The recommended quote is already expired; choose a current candidate before quote lock.';
+    autoSelectable = false;
+  } else if (!inBudget) {
+    status = 'over_cap';
+    reason = `The recommended quote exceeds the immutable ${money(task.spendingCeilingMinor, task.currency)} task ceiling.`;
+    autoSelectable = false;
+  }
+  return {
+    status,
+    candidateId: candidate?.id || null,
+    reason,
+    autoSelectable
+  };
+}
+
 function validateIssuedInstrument(issued, locked) {
   const scope = issued?.scope;
   if (!issued || !isText(issued.mode) || !isText(issued.reference) || issued.status !== 'active' || !isTimestamp(issued.issuedAt) || !scope || scope.merchant !== locked.merchant || scope.merchantDomain !== locked.merchantDomain || scope.item !== locked.item || scope.variant !== locked.variant || scope.amountMinor !== locked.totalMinor || scope.currency !== locked.currency || scope.expiresAt !== locked.expiresAt || scope.maxCaptures !== 1 || scope.reusable !== false) {
@@ -138,6 +173,28 @@ function validateCheckoutResult(result, scope) {
 
 function publicTask(task) {
   return clone(task);
+}
+
+function createReceipt(task, completedAt) {
+  const locked = task.quote?.lockedSnapshot;
+  const checkout = task.checkout;
+  return {
+    id: newId('receipt'),
+    status: 'confirmed',
+    mode: 'demo / mock',
+    issuedAt: completedAt,
+    merchant: locked?.merchant,
+    merchantDomain: locked?.merchantDomain,
+    item: locked?.item,
+    variant: locked?.variant,
+    amountMinor: checkout?.amountMinor ?? locked?.totalMinor,
+    currency: checkout?.currency ?? locked?.currency,
+    checkoutReference: checkout?.checkoutReference,
+    authorizationReference: checkout?.authorizationReference || null,
+    captureReference: checkout?.captureReference || null,
+    authority: 'one-use scoped instrument retired',
+    disclosure: 'DEMO / MOCK receipt; no live funds moved.'
+  };
 }
 
 function appendAudit(data, taskId, clock, type, status, summary, details = {}) {
@@ -231,7 +288,15 @@ class NaviPayService {
       instrument: null,
       checkout: null,
       outcome: null,
-      failure: null
+      receipt: null,
+      failure: null,
+      automation: {
+        status: 'not_started',
+        automatic: false,
+        startedAt: null,
+        completedAt: null,
+        nextAction: 'Start the bounded purchase run.'
+      }
     };
     this.store.transaction((data) => {
       data.tasks[task.id] = task;
@@ -278,6 +343,217 @@ class NaviPayService {
   getAudit(taskId) {
     if (!this.store.data.tasks[taskId]) throw new DomainError(404, 'TASK_NOT_FOUND', 'That assigned task does not exist.');
     return clone(this.store.data.auditEvents.filter((event) => event.taskId === taskId));
+  }
+
+  getReceipt(taskId) {
+    const task = this.store.data.tasks[taskId];
+    if (!task) throw new DomainError(404, 'TASK_NOT_FOUND', 'That assigned task does not exist.');
+    if (!task.receipt) throw new DomainError(404, 'RECEIPT_NOT_READY', 'A confirmed receipt is not available for this task yet.');
+    return clone(task.receipt);
+  }
+
+  _setAutomation(taskId, patch) {
+    return this.store.transaction((data) => {
+      const task = data.tasks[taskId];
+      if (!task) throw new DomainError(404, 'TASK_NOT_FOUND', 'That assigned task does not exist.');
+      task.automation = {
+        status: 'not_started',
+        automatic: false,
+        startedAt: null,
+        completedAt: null,
+        nextAction: null,
+        ...task.automation,
+        ...patch
+      };
+      task.updatedAt = this.clock().toISOString();
+      return task.automation;
+    });
+  }
+
+  _finishOrchestration(taskId, result, automatic = true) {
+    const current = this.store.data.tasks[taskId];
+    if (!current) throw new DomainError(404, 'TASK_NOT_FOUND', 'That assigned task does not exist.');
+    let status = 'running';
+    let nextAction = null;
+    if (current.state === 'completed') {
+      status = 'completed';
+      nextAction = 'none';
+    } else if (current.state === 'reconciliation_required') {
+      status = 'awaiting_reconciliation';
+      nextAction = 'Reconcile the provider result. Checkout will not be retried automatically.';
+    } else if (current.state === 'quoted' && !current.quote?.locked) {
+      status = 'awaiting_selection';
+      nextAction = 'Select a candidate to lock the exact quote and resume the bounded run.';
+    } else if (current.state === 'failed') {
+      status = 'stopped';
+      nextAction = 'Review the exception. No further payment action was attempted.';
+    }
+    this._setAutomation(taskId, {
+      status,
+      automatic,
+      completedAt: ['completed', 'stopped', 'awaiting_reconciliation'].includes(status) ? this.clock().toISOString() : null,
+      nextAction
+    });
+    const task = this.getTask(taskId);
+    return {
+      statusCode: result.statusCode,
+      body: {
+        ...(result.body || {}),
+        task,
+        run: {
+          status: task.automation.status,
+          automatic: task.automation.automatic,
+          nextAction: task.automation.nextAction
+        }
+      }
+    };
+  }
+
+  _advanceTask(taskId, { candidateId = null } = {}) {
+    let task = this.getTask(taskId);
+    if (['completed', 'failed', 'reconciliation_required'].includes(task.state)) {
+      return this._finishOrchestration(taskId, { statusCode: 200, body: taskResponse(task) }, true);
+    }
+    const automatic = !candidateId;
+    this._setAutomation(taskId, {
+      status: 'running',
+      automatic,
+      startedAt: task.automation?.startedAt || this.clock().toISOString(),
+      completedAt: null,
+      nextAction: 'NaviPay is running the bounded purchase.'
+    });
+
+    const call = (name, args) => {
+      const result = this[name](taskId, `orchestrator-${taskId}-${name}`, ...args);
+      if (result.statusCode < 200 || result.statusCode >= 300) return this._finishOrchestration(taskId, result, automatic);
+      task = this.getTask(taskId);
+      return null;
+    };
+
+    if (task.state === 'created') {
+      const stopped = call('openTask', []);
+      if (stopped) return stopped;
+    }
+    task = this.getTask(taskId);
+    if (task.state === 'created') {
+      const stopped = call('verifyFunding', []);
+      if (stopped) return stopped;
+    } else if (task.state === 'funded') {
+      // Funding may already be complete after a reload; continue to discovery.
+    }
+    task = this.getTask(taskId);
+    if (task.state === 'funded') {
+      const stopped = call('discover', []);
+      if (stopped) return stopped;
+    }
+    task = this.getTask(taskId);
+    if (task.state === 'quoted' && !task.quote.locked) {
+      const recommendation = task.quote.recommendation || quoteRecommendation(task, task.quote.candidates, this.clock());
+      const selected = candidateId || (recommendation.autoSelectable ? recommendation.candidateId : null);
+      if (!selected) return this._finishOrchestration(taskId, { statusCode: 200, body: taskResponse(task) }, false);
+      const stopped = call('lockQuote', [selected]);
+      if (stopped) return stopped;
+    }
+    task = this.getTask(taskId);
+    if (task.state === 'quoted' && task.quote?.locked) {
+      const stopped = call('approvePolicy', []);
+      if (stopped) return stopped;
+    }
+    task = this.getTask(taskId);
+    if (task.state === 'policy_approved') {
+      const stopped = call('issueInstrument', []);
+      if (stopped) return stopped;
+    }
+    task = this.getTask(taskId);
+    if (task.state === 'instrument_issued') {
+      const stopped = call('executeCheckout', []);
+      if (stopped) return stopped;
+    }
+    return this._finishOrchestration(taskId, { statusCode: 200, body: taskResponse(this.getTask(taskId)) }, automatic);
+  }
+
+  _readRunIdempotency(key, fingerprint) {
+    const previous = this.store.data.idempotency[key];
+    if (!previous) return null;
+    if (previous.requestFingerprint !== fingerprint) {
+      return {
+        statusCode: 409,
+        body: {
+          error: {
+            code: 'IDEMPOTENCY_KEY_REUSED',
+            message: 'Use a new Idempotency-Key when the run input changes.'
+          }
+        },
+        replayed: false
+      };
+    }
+    if (previous.response) return { ...clone(previous.response), replayed: true };
+    return { taskId: previous.taskId };
+  }
+
+  orchestrateTask(taskId, idempotencyKey, { candidateId = null } = {}) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) {
+      throw new DomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide a short Idempotency-Key for this purchase run.');
+    }
+    const fingerprint = candidateId || '';
+    const key = `orchestrate:${taskId}:${idempotencyKey}`;
+    const previous = this._readRunIdempotency(key, fingerprint);
+    if (previous && (previous.body || previous.taskId === undefined)) return previous;
+    const result = this._advanceTask(taskId, { candidateId });
+    const response = { ...result, replayed: false };
+    this.store.transaction((data) => {
+      data.idempotency[key] = {
+        createdAt: this.clock().toISOString(),
+        requestFingerprint: fingerprint,
+        taskId,
+        response: clone(response)
+      };
+    });
+    return response;
+  }
+
+  startPurchase({ idempotencyKey, scenario = 'happy', origin = 'operator', request, merchant, item, amount, amountMinor, candidateId = null } = {}) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) {
+      throw new DomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide a short Idempotency-Key for this purchase run.');
+    }
+    const fingerprint = JSON.stringify({ scenario, origin, request, merchant, item, amount, amountMinor, candidateId });
+    const key = `orchestrate:new:${idempotencyKey}`;
+    const previous = this._readRunIdempotency(key, fingerprint);
+    if (previous && (previous.body || previous.taskId === undefined)) return previous;
+    const task = previous?.taskId
+      ? this.getTask(previous.taskId)
+      : this.createTask({ scenario, origin, request, merchant, item, amount, amountMinor });
+    if (!previous) {
+      this.store.transaction((data) => {
+        data.idempotency[key] = {
+          createdAt: this.clock().toISOString(),
+          requestFingerprint: fingerprint,
+          taskId: task.id,
+          response: null
+        };
+      });
+    }
+    const result = this._advanceTask(task.id, { candidateId });
+    const response = {
+      statusCode: previous ? result.statusCode : 201,
+      body: result.body,
+      replayed: false
+    };
+    this.store.transaction((data) => {
+      data.idempotency[key] = {
+        ...data.idempotency[key],
+        response: clone(response)
+      };
+    });
+    return response;
+  }
+
+  runPurchase(input = {}) {
+    const fingerprint = JSON.stringify(input);
+    return this.startPurchase({
+      ...input,
+      idempotencyKey: input.idempotencyKey || `service-run-${crypto.createHash('sha256').update(fingerprint).digest('hex')}`
+    });
   }
 
   replayTask(taskId, idempotencyKey) {
@@ -440,11 +716,13 @@ class NaviPayService {
           discoveredAt: result.discoveredAt,
           candidates: result.candidates,
           recommendedCandidateId: result.recommendedCandidateId,
+          recommendation: null,
           selectedCandidateId: null,
           locked: false,
           lockedAt: null,
           lockedSnapshot: null
         };
+        task.quote.recommendation = quoteRecommendation(task, result.candidates, this.clock());
         task.state = 'quoted';
         task.updatedAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'discovery.quoted', 'success', 'One deterministic quote set is ready to review.', {
@@ -651,6 +929,7 @@ class NaviPayService {
           currency: result.currency,
           completedAt: result.capturedAt
         };
+        task.receipt = createReceipt(task, result.capturedAt);
         task.instrument.status = 'retired';
         task.instrument.retiredAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'checkout.authorized', 'success', 'Merchant authorization received and captured.', {
@@ -711,6 +990,7 @@ class NaviPayService {
           nextAction: 'none',
           reconciledAt: this.clock().toISOString()
         };
+        task.receipt = createReceipt(task, task.outcome.reconciledAt);
         task.instrument.status = 'retired';
         task.instrument.retiredAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'checkout.reconciled', 'success', 'Operator reconciled the unknown result as authorized.', {
@@ -729,6 +1009,13 @@ class NaviPayService {
           retry: 'not attempted'
         });
       }
+      task.automation = {
+        ...task.automation,
+        status: task.state === 'completed' ? 'completed' : 'stopped',
+        automatic: task.automation?.automatic || false,
+        completedAt: this.clock().toISOString(),
+        nextAction: 'none'
+      };
       task.updatedAt = this.clock().toISOString();
       return { statusCode: 200, body: taskResponse(task) };
     }, resolution || '');

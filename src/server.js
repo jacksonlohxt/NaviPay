@@ -1,4 +1,5 @@
 const http = require('node:http');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DomainError, NaviPayService } = require('./domain');
@@ -88,6 +89,40 @@ function routeApi(service, req, res, url) {
       return json(res, 201, { task });
     });
   }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'purchases' && segments[2] === 'run' && method === 'POST') {
+    return readBody(req).then((body) => {
+      if (body !== null && (typeof body !== 'object' || Array.isArray(body))) {
+        throw new DomainError(400, 'INVALID_PURCHASE_RUN', 'Purchase run input must be a JSON object.');
+      }
+      const input = body || {};
+      if (input.currency !== undefined && input.currency !== 'XSGD') {
+        throw new DomainError(422, 'UNSUPPORTED_CURRENCY', 'NaviPay local runs use XSGD only.');
+      }
+      const fallback = `browser-run-${crypto.createHash('sha256').update(JSON.stringify({ request: input.request, merchant: input.merchant, item: input.item, amount: input.amount, scenario: input.scenario || 'happy', candidateId: input.candidateId || null })).digest('hex')}`;
+      const result = service.startPurchase({
+        idempotencyKey: idempotencyKey(req, fallback),
+        scenario: input.scenario === undefined ? 'happy' : input.scenario,
+        origin: input.origin || 'operator',
+        request: input.request,
+        merchant: input.merchant,
+        item: input.item,
+        amount: input.amount,
+        amountMinor: input.amountMinor,
+        candidateId: input.candidateId || null
+      });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'run' && method === 'POST') {
+    return readBody(req).then((body) => {
+      if (body !== null && (typeof body !== 'object' || Array.isArray(body))) {
+        throw new DomainError(400, 'INVALID_PURCHASE_RUN', 'Purchase run input must be a JSON object.');
+      }
+      const input = body || {};
+      const result = service.orchestrateTask(segments[2], idempotencyKey(req, `browser-run-${segments[2]}-${input.candidateId || 'auto'}`), { candidateId: input.candidateId || null });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
   if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'replay' && method === 'POST') {
     return readBody(req).then(() => {
       const result = service.replayTask(segments[2], idempotencyKey(req, `browser-replay-${segments[2]}`));
@@ -99,6 +134,9 @@ function routeApi(service, req, res, url) {
   }
   if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'audit' && method === 'GET') {
     return json(res, 200, { events: service.getAudit(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'receipt' && method === 'GET') {
+    return json(res, 200, { receipt: service.getReceipt(segments[2]) });
   }
   if (segments.length < 4 || segments[0] !== 'api' || segments[1] !== 'tasks' || method !== 'POST') {
     throw new DomainError(404, 'ROUTE_NOT_FOUND', 'API route not found.');

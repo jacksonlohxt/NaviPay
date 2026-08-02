@@ -19,34 +19,29 @@ The local JSON store is written to `.data/navipay.json` with an atomic, permissi
 
 Enter **I want Apple earphones** in the purchase-request field. NaviPay deterministically normalizes the text into the brand `Apple`, product category `earphones`, and keywords `apple` and `earphones`. The mock discovery adapter ranks seeded examples such as Apple AirPods 4, Apple AirPods Pro 2, Sony WF-C700N, Samsung Galaxy Buds3, Soundcore Liberty 4 NC, and Bose QuietComfort Ultra Earbuds. Each candidate includes its merchant, item, variant, XSGD total, availability, relevance explanation, expiry, and local-catalog evidence.
 
-This catalog is deliberately small and local. It is not a live marketplace, does not check real inventory, and does not scrape arbitrary websites. Results carry a `DEMO / MOCK` disclosure and are only quote candidates. Selecting one locks the merchant, item, variant, total, currency, and expiry in the persisted task before policy, issuance, checkout, outcome, and audit continue through the existing backend lifecycle.
+This catalog is deliberately small and local. It is not a live marketplace, does not check real inventory, and does not scrape arbitrary websites. Results carry a `DEMO / MOCK` disclosure and are only quote candidates. A clear in-budget recommendation is selected by the server and locked automatically; an ambiguous or over-cap run pauses with the ranked candidates visible so the operator can choose before lock. The server then owns policy, issuance, checkout, receipt, persistence, and redacted audit transitions as one run.
 
 The replaceable discovery boundary is `MockDiscoveryAdapter` in `src/adapters.js`. A future approved live source can implement the same adapter contract and normalize its response there, while keeping credentials inside the provider process and preserving the server-side quote lock, cap, policy, scoped instrument, idempotency, and reconciliation safeguards. The local adapter remains the default.
 
 ## Fresh-start product walkthrough
 
 1. Start with `npm start`, then open the operator workspace. The persistent task list shows the current run and prior outcomes after refresh or server restart.
-2. Enter **I want Apple earphones**, then choose **Create request task**. The server stores the raw request and parsed intent before lifecycle work begins. The direct merchant, item, and amount path remains available under **Use the direct merchant, item, and amount path** for exact preselected purchases.
-3. Select the new task in **Persisted runs** if needed. Use **Open assigned task**, verify funding, and choose **Discover ranked candidates**. Select an AirPods result or an alternative, inspect the evidence and expiry, then lock one exact quote before continuing through policy, issuance, and the one checkout action.
-4. At funding, inspect the separate on-chain evidence and card-spendable settlement fields. The latter is a mock issuer-ledger fact and is never inferred from the chain observation.
-5. Review the exact merchant, item, variant, price, currency, availability, evidence, and expiry before locking the quote. Policy enforces the ceiling before issuing a provider-controlled, one-use instrument.
-6. Inspect **Redacted evidence** at any stage. It is an append-only task timeline without credentials or wallet keys. Completed and safely stopped tasks remain in history.
-7. Use **Safely replay as new task** only for a completed or safely stopped task. An unresolved unknown checkout cannot be replayed. Use **Reset local demo** only when you intentionally want to discard this local history.
+2. Enter **I want Apple earphones**, then choose **Create request task**. The browser calls `POST /api/purchases/run`; the backend stores the raw request and parsed intent, verifies funding, discovers and ranks local candidates, auto-selects Apple AirPods 4, locks the quote, passes policy, issues one scoped mock authority, executes one checkout, and returns a persisted receipt.
+3. The page shows the interpreted intent, selected recommendation, exact quote, backend-owned progress timeline, final receipt, history entry, and redacted audit evidence. There are no Continue buttons for the happy path.
+4. If a request is genuinely ambiguous, or a quote exceeds the immutable ceiling, the run pauses at ranked candidates. Choose a candidate and **Confirm selection and finish run**; the server resumes the same bounded lifecycle. An unknown checkout instead stops for explicit reconciliation and is never retried.
+5. At any point, inspect the separate on-chain evidence and card-spendable settlement fields. The latter is a mock issuer-ledger fact and is never inferred from the chain observation.
+6. Use **Safely replay as new task** only for a completed or safely stopped task. An unresolved unknown checkout cannot be replayed. Use **Reset local demo** only when you intentionally want to discard this local history.
 
 ## Competition demo script
 
 The console is designed for a short, reliable presentation:
 
-1. Start with the seeded **Assigned purchase brief**. Point out the single task, XSGD currency, immutable XSGD 1,000 ceiling, and visible `DEMO / MOCK PROVIDERS` disclosure.
-2. Select **Happy path** in the Judge scenarios card, then choose **Start selected scenario** if a previous run is already complete. The header button replays the selected scenario without leaving the page.
-3. Click **Open assigned task**. Explain that opening records operator intent, but does not authorize payment.
-4. Click **Verify fixture funding**. Show the separate on-chain evidence and mock card-spendable settlement truths.
-5. Continue to discovery, select the recommended Harbor Supply quote, and click **Lock selected quote**. Call out that merchant, item, amount, currency, and expiry become immutable.
-6. Run **server policy approval**. The 1,000 XSGD ceiling is checked before issuance.
-7. Issue the **mock scoped instrument**, continue to execution, and click **Authorize payment once**. Show the captured authorization, retired one-use authority, and redacted append-only audit trail.
-8. Use **Reset local demo** to return to a known seeded entry before another presentation.
+1. Start with the seeded task or enter **I want Apple earphones**. Point out the single task authority, XSGD currency, immutable XSGD 1,000 ceiling, and visible `DEMO / MOCK PROVIDERS` disclosure.
+2. Submit the request once. The backend-driven run completes the happy path without lifecycle clicks. Show the interpreted intent, Apple AirPods 4 recommendation, progress timeline, receipt, and append-only redacted audit.
+3. Select a Judge scenario only when demonstrating an exception. Unknown checkout presents reconciliation choices; over-cap and ambiguous runs present candidates before lock; funding, discovery, issuer, and merchant errors stop safely.
+4. Use **Reset local demo** to return to a known local state before another presentation.
 
-Every action is backed by the JSON API and persisted locally. Refreshing the page or restarting the server keeps the current run. Repeating an action with the same idempotency key replays the stored result without calling an adapter twice.
+Every consequential transition is backed by the JSON API and persisted locally. Refreshing the page or restarting the server keeps the current run. Repeating an action with the same idempotency key replays the stored result without calling an adapter twice.
 
 ## Scenario walkthrough
 
@@ -67,12 +62,13 @@ npm test
 npm run check
 ```
 
-The focused tests cover deterministic request parsing and catalog ranking, natural request candidate selection and quote locking, the complete lifecycle, separated funding and settlement evidence, quote immutability, the XSGD ceiling, idempotency, all deterministic failure and reconciliation paths, scoped checkout-result validation, reset behavior, and persistent store recovery boundaries.
+The focused tests cover deterministic request parsing and catalog ranking, the one-call Apple request-to-receipt orchestration, automatic selection, ambiguity and over-cap pauses, quote locking, receipt and audit persistence after reload, idempotency, all deterministic failure and reconciliation paths, scoped checkout-result validation, reset behavior, and persistent store recovery boundaries. The browser console uses the same `POST /api/purchases/run` contract rather than faking lifecycle progress.
 
 ## Architecture and extension points
 
-- `src/domain.js` owns the server-side six-stage state machine, policy checks, idempotency records, quote lock, one-use instrument invariant, reconciliation, and audit events.
+- `src/domain.js` owns the server-side six-stage state machine, the `startPurchase` / `orchestrateTask` bounded run, policy checks, idempotency records, quote recommendation and lock, one-use instrument invariant, receipt, reconciliation, and audit events.
 - `src/adapters.js` defines deterministic request parsing, local-catalog ranking, and replaceable funding, discovery, issuer, and checkout contracts. The default adapters return local fixtures and never need credentials. The discovery contract receives either a normalized natural request intent or the preserved direct task purchase and returns candidates; the issuer and checkout contracts receive only the locked scope.
+- `POST /api/purchases/run` is the browser integration boundary. `POST /api/tasks/:id/run` resumes an ambiguous or over-cap task after an explicit candidate choice. Both are idempotent and return the persisted task plus run status.
 - `src/store.js` provides the single-host persistent store, atomic writes, reset behavior, and state-shape validation. No database service is required for this MVP.
 - `src/server.js` serves the JSON API and static operator console from one origin. The API is the integration boundary for a future brief.
 - `public/` contains the responsive six-stage operator experience: entry, funding, discovery and quote lock, issuance, execution, and outcome/audit.

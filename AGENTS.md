@@ -16,3 +16,4 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - Run the single-host demo with `npm start`; the server entrypoint and API routes are authoritative in `src/server.js`.
 - Run `npm test` for lifecycle and policy coverage, and `npm run check` for syntax validation.
 - The default path is deterministic mock mode. Domain invariants and replaceable adapter contracts live in `src/domain.js` and `src/adapters.js`.
+- The primary end-to-end browser contract is `POST /api/purchases/run`; `POST /api/tasks/:id/run` resumes a persisted run that needs candidate selection. Receipts are persisted on the task and exposed at `/api/tasks/:id/receipt`.
