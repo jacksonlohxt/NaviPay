@@ -3,6 +3,11 @@ const { AdapterError, MockCheckoutAdapter, MockDiscoveryAdapter, MockFundingAdap
 
 const TASK_CEILING_MINOR = 100000;
 const CURRENCY = 'XSGD';
+const DEFAULT_PURCHASE = {
+  merchant: 'Harbor Supply',
+  item: 'Anker 737 Power Bank',
+  amountMinor: 8950
+};
 const SCENARIOS = new Set(['happy', 'over-cap', 'unknown-checkout', 'checkout-failure', 'issuer-failure', 'funding-failure', 'discovery-failure']);
 
 class DomainError extends Error {
@@ -33,6 +38,45 @@ function money(minor, currency = CURRENCY) {
 
 function isText(value) {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function parseAmountMinor(value, field = 'amount') {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0 || Math.round(value * 100) !== value * 100) {
+      throw new DomainError(422, 'INVALID_AMOUNT', `${field} must be a positive XSGD amount with at most two decimal places.`);
+    }
+    return Math.round(value * 100);
+  }
+  if (typeof value !== 'string' || !/^\d+(?:\.\d{1,2})?$/.test(value.trim())) {
+    throw new DomainError(422, 'INVALID_AMOUNT', `${field} must be a positive XSGD amount with at most two decimal places.`);
+  }
+  const minor = Math.round(Number(value.trim()) * 100);
+  if (!Number.isSafeInteger(minor) || minor <= 0) {
+    throw new DomainError(422, 'INVALID_AMOUNT', `${field} must be a positive XSGD amount with at most two decimal places.`);
+  }
+  return minor;
+}
+
+function validatePurchaseInput({ merchant, item, amount, amountMinor }) {
+  if (!isText(merchant) || merchant.trim().length > 120 || /[\u0000-\u001f\u007f]/.test(merchant)) {
+    throw new DomainError(422, 'INVALID_MERCHANT', 'Merchant is required and must be 120 characters or fewer.');
+  }
+  if (!isText(item) || item.trim().length > 180 || /[\u0000-\u001f\u007f]/.test(item)) {
+    throw new DomainError(422, 'INVALID_ITEM', 'Item is required and must be 180 characters or fewer.');
+  }
+  const minor = amountMinor !== undefined ? amountMinor : parseAmountMinor(amount, 'amount');
+  if (!Number.isSafeInteger(minor) || minor <= 0) {
+    throw new DomainError(422, 'INVALID_AMOUNT', 'amountMinor must be a positive integer amount of XSGD cents.');
+  }
+  if (minor > TASK_CEILING_MINOR) {
+    throw new DomainError(422, 'AMOUNT_EXCEEDS_CEILING', `The amount cannot exceed the immutable task ceiling of ${money(TASK_CEILING_MINOR)}.`);
+  }
+  return {
+    merchant: merchant.trim(),
+    item: item.trim(),
+    amountMinor: minor,
+    currency: CURRENCY
+  };
 }
 
 function isMinor(value) {
@@ -133,19 +177,35 @@ class NaviPayService {
     this.checkoutAdapter = checkoutAdapter;
   }
 
-  createTask({ scenario = 'happy', origin = 'operator' } = {}) {
+  createTask({ scenario = 'happy', origin = 'operator', merchant, item, amount, amountMinor, replayOf } = {}) {
     if (!SCENARIOS.has(scenario)) {
       throw new DomainError(400, 'INVALID_SCENARIO', `Unknown demo scenario: ${scenario}.`);
     }
+    const hasPurchaseInput = [merchant, item, amount, amountMinor].some((value) => value !== undefined);
+    const purchase = hasPurchaseInput
+      ? validatePurchaseInput({ merchant, item, amount, amountMinor })
+      : {
+        ...DEFAULT_PURCHASE,
+        amountMinor: scenario === 'over-cap' ? 125000 : DEFAULT_PURCHASE.amountMinor,
+        currency: CURRENCY
+      };
+    const createdClock = this.clock();
+    const latestCreatedAt = Object.values(this.store.data.tasks)
+      .map((existing) => Date.parse(existing.createdAt))
+      .filter(Number.isFinite)
+      .reduce((latest, value) => Math.max(latest, value), 0);
+    const createdAt = new Date(Math.max(createdClock.getTime(), latestCreatedAt + (latestCreatedAt ? 1 : 0))).toISOString();
     const task = {
       id: newId('task'),
-      createdAt: this.clock().toISOString(),
-      updatedAt: this.clock().toISOString(),
+      createdAt,
+      updatedAt: createdAt,
       origin,
+      replayOf: replayOf || null,
       scenario,
       mode: 'demo / mock',
       currency: CURRENCY,
       spendingCeilingMinor: TASK_CEILING_MINOR,
+      purchase,
       state: 'created',
       entryOpened: false,
       funding: null,
@@ -160,6 +220,9 @@ class NaviPayService {
       data.tasks[task.id] = task;
       appendAudit(data, task.id, this.clock, 'task.created', 'info', 'Assigned purchase task created.', {
         mode: task.mode,
+        merchant: task.purchase.merchant,
+        item: task.purchase.item,
+        amount: money(task.purchase.amountMinor, task.purchase.currency),
         spendingCeiling: money(task.spendingCeilingMinor)
       });
     });
@@ -192,6 +255,36 @@ class NaviPayService {
   getAudit(taskId) {
     if (!this.store.data.tasks[taskId]) throw new DomainError(404, 'TASK_NOT_FOUND', 'That assigned task does not exist.');
     return clone(this.store.data.auditEvents.filter((event) => event.taskId === taskId));
+  }
+
+  replayTask(taskId, idempotencyKey) {
+    return this._action(taskId, 'replay-task', idempotencyKey, (task) => {
+      if (task.state === 'reconciliation_required' || task.outcome?.status === 'unknown') {
+        throw new DomainError(409, 'UNKNOWN_CHECKOUT_REPLAY_BLOCKED', 'Resolve the unknown checkout before creating a replay. NaviPay will not blindly repeat it.');
+      }
+      if (!['completed', 'failed'].includes(task.state)) {
+        throw new DomainError(409, 'TASK_NOT_REPLAYABLE', 'Only a completed or safely stopped task can be replayed.');
+      }
+      const purchase = task.purchase || {
+        merchant: task.quote?.lockedSnapshot?.merchant,
+        item: task.quote?.lockedSnapshot?.item,
+        amountMinor: task.quote?.lockedSnapshot?.totalMinor
+      };
+      const replayInput = {
+        scenario: task.scenario,
+        origin: 'replay',
+        replayOf: task.id
+      };
+      if (purchase.amountMinor <= TASK_CEILING_MINOR) {
+        Object.assign(replayInput, {
+          merchant: purchase.merchant,
+          item: purchase.item,
+          amountMinor: purchase.amountMinor
+        });
+      }
+      const replay = this.createTask(replayInput);
+      return { statusCode: 201, body: { task: replay, replayOf: task.id } };
+    });
   }
 
   _action(taskId, action, idempotencyKey, handler, requestFingerprint = '') {
@@ -312,7 +405,7 @@ class NaviPayService {
       task.updatedAt = this.clock().toISOString();
       appendAudit(data, task.id, this.clock, 'discovery.started', 'info', 'Discovery started for the assigned item.', { mode: task.mode });
       try {
-        const result = this.discoveryAdapter.discover({ taskId, scenario: task.scenario, currency: task.currency });
+        const result = this.discoveryAdapter.discover({ taskId, scenario: task.scenario, currency: task.currency, purchase: task.purchase });
         validateDiscoveryResult(result, task.currency);
         task.quote = {
           mode: result.mode,

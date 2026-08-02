@@ -103,6 +103,49 @@ h3 { margin-bottom: .35rem; font-size: 1rem; letter-spacing: -.02em; }
 .stage-button { width: 100%; border: 0; cursor: default; }
 
 .console-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(250px, .45fr); gap: 1.1rem; align-items: start; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(220px, .65fr); gap: 0; margin-bottom: 1.35rem; overflow: hidden; box-shadow: 0 14px 32px rgba(16,42,39,.07); }
+.workspace-create { padding: clamp(1rem, 2.2vw, 1.55rem); border-right: 1px solid var(--line); }
+.workspace-heading { max-width: 620px; }
+.workspace-heading h2 { margin-top: .3rem; }
+.workspace-heading p, .history-intro { margin-bottom: 0; color: var(--muted); font-size: .82rem; }
+.task-form { display: grid; grid-template-columns: 1.05fr 1.35fr .75fr auto; gap: .7rem; align-items: end; margin-top: 1.15rem; }
+.form-field label { display: block; margin-bottom: .35rem; font-size: .74rem; font-weight: 850; }
+.form-field label span { color: var(--muted); font-weight: 650; }
+.form-field input { width: 100%; min-height: 42px; border: 1px solid rgba(16,42,39,.2); border-radius: 10px; padding: .62rem .7rem; background: var(--paper-strong); color: var(--ink); font-size: .85rem; }
+.form-field input:invalid:not(:placeholder-shown) { border-color: #c95b3b; }
+.field-hint { min-height: 1.8em; margin: .28rem 0 0; color: var(--muted); font-size: .67rem; line-height: 1.25; }
+.form-actions { align-self: end; }
+.form-error { max-width: 240px; margin: .35rem 0 0; color: #8d442f; font-size: .7rem; font-weight: 750; }
+.workspace-current { display: flex; flex-direction: column; gap: .45rem; padding: 1.15rem; background: var(--ink); color: white; }
+.current-task-title { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.current-task-title strong { overflow-wrap: anywhere; font-size: 1.02rem; }
+.workspace-current > p { margin: 0; color: #c0d4c9; font-size: .78rem; }
+.current-task-meta { display: flex; justify-content: space-between; gap: .5rem; margin: .2rem 0 .55rem; color: #9fbbb0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .64rem; }
+.workspace-current .state-pill { background: rgba(184,243,107,.18); color: var(--lime); }
+.workspace-current .button { align-self: flex-start; margin-top: auto; }
+.safe-replay-note { margin-top: auto !important; padding-top: .65rem; border-top: 1px solid rgba(255,255,255,.14); color: #ffcfbf !important; font-size: .7rem !important; }
+.workspace-history { grid-column: 1 / -1; padding: 1.1rem clamp(1rem, 2.2vw, 1.55rem) 1.25rem; border-top: 1px solid var(--line); background: rgba(240,237,226,.5); }
+.history-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.history-heading h3 { margin: .25rem 0 0; font-size: 1.1rem; }
+.history-count { color: var(--muted); font-size: .72rem; font-weight: 850; }
+.task-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: .6rem; margin: .85rem 0 0; padding: 0; list-style: none; }
+.task-list-item { display: flex; min-width: 0; width: 100%; align-items: flex-start; justify-content: space-between; gap: .75rem; padding: .75rem; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.7); color: var(--ink); text-align: left; }
+.task-list-item:hover { border-color: #6aaa84; }
+.task-list-item.is-current { border-color: var(--ink); box-shadow: 0 0 0 2px var(--ink); }
+.task-list-main, .task-list-side { display: flex; min-width: 0; flex-direction: column; gap: .16rem; }
+.task-list-main strong, .task-list-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-list-main strong { font-size: .8rem; }
+.task-list-main span, .task-list-side small { color: var(--muted); font-size: .68rem; }
+.task-list-side { align-items: flex-end; text-align: right; }
+.task-list-side > span:first-child { font-size: .75rem; font-weight: 850; white-space: nowrap; }
+.task-list-side .state-pill { font-size: .56rem; }
+.task-list-side small { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-inspector { margin-top: 1.1rem; }
+.audit-inspector .audit-header { align-items: flex-start; }
+.audit-inspector .audit-header h2 { margin-top: .25rem; }
+.audit-truth-note { display: flex; gap: .6rem; margin-bottom: 1rem; padding: .7rem .8rem; border-radius: 12px; background: var(--mint); font-size: .72rem; }
+.audit-truth-note strong { white-space: nowrap; }
+.audit-truth-note span { color: var(--muted); }
 .card { background: rgba(255,255,255,.74); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .card-pad { padding: clamp(1rem, 2.2vw, 1.6rem); }
 .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.1rem; }
@@ -209,6 +252,11 @@ h3 { margin-bottom: .35rem; font-size: 1rem; letter-spacing: -.02em; }
 
 @media (max-width: 900px) {
   .console-grid { grid-template-columns: 1fr; }
+  .workspace { grid-template-columns: 1fr; }
+  .workspace-create { border-right: 0; }
+  .workspace-current { min-height: 190px; }
+  .task-form { grid-template-columns: repeat(2, 1fr); }
+  .form-actions { grid-column: span 2; }
   .guardrail-stack { grid-template-columns: repeat(2, 1fr); }
   .scenario-card { grid-column: span 2; }
 }
@@ -222,7 +270,11 @@ h3 { margin-bottom: .35rem; font-size: 1rem; letter-spacing: -.02em; }
   .stage-item { min-width: 100px; min-height: 47px; padding: .45rem .3rem; }
   .stage-label { font-size: .56rem; line-height: 1.1; white-space: normal; }
   .stage-number { flex-basis: 20px; width: 20px; height: 20px; }
+  .task-form { grid-template-columns: 1fr; }
+  .form-actions { grid-column: auto; }
   .brief-grid, .money-truths, .outcome-meta { grid-template-columns: 1fr; }
+  .task-list { grid-template-columns: 1fr; }
+  .audit-truth-note { flex-direction: column; gap: .15rem; }
   .guardrail-stack { grid-template-columns: 1fr; }
   .scenario-card { grid-column: auto; }
   .candidate { grid-template-columns: auto 1fr; }

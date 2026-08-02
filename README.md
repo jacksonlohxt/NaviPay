@@ -13,7 +13,17 @@ npm start
 
 Open <http://127.0.0.1:3000>. The app seeds a fresh happy-path task when the local store is empty. It needs no provider credentials, RPC access, merchant account, or external service.
 
-The local JSON store is written to `.data/navipay.json` with an atomic, permission-restricted replacement. Set `NAVIPAY_DATA_FILE` to use another location. Use **Reset local demo** in the console, or delete the file while the server is stopped, to clear local runs and seed a new happy path.
+The local JSON store is written to `.data/navipay.json` with an atomic, permission-restricted replacement. Set `NAVIPAY_DATA_FILE` to use another location. **Reset local demo** is an explicit destructive control: it clears local tasks and audit history, then seeds one new happy path. A safe replay creates a separate task and preserves the original record.
+
+## Fresh-start product walkthrough
+
+1. Start with `npm start`, then open the operator workspace. The persistent task list shows the current run and prior outcomes after refresh or server restart.
+2. Enter a merchant, item, and positive XSGD amount, then choose **Create purchase task**. The client and server reject malformed amounts and anything above the immutable XSGD 1,000 ceiling. Accepted tasks are saved before lifecycle work begins.
+3. Select the new task in **Persisted runs** if needed. The task context shows the requested purchase and its status. Use **Open assigned task** to record intent, then proceed through funding, constrained discovery, quote lock, policy, issuance, and the one checkout action.
+4. At funding, inspect the separate on-chain evidence and card-spendable settlement fields. The latter is a mock issuer-ledger fact and is never inferred from the chain observation.
+5. Review the exact merchant, item, amount, currency, and expiry before locking the quote. Policy enforces the ceiling before issuing a provider-controlled, one-use instrument.
+6. Inspect **Redacted evidence** at any stage. It is an append-only task timeline without credentials or wallet keys. Completed and safely stopped tasks remain in history.
+7. Use **Safely replay as new task** only for a completed or safely stopped task. An unresolved unknown checkout cannot be replayed. Use **Reset local demo** only when you intentionally want to discard this local history.
 
 ## Competition demo script
 
@@ -54,12 +64,12 @@ The focused tests cover the complete lifecycle, separated funding and settlement
 ## Architecture and extension points
 
 - `src/domain.js` owns the server-side six-stage state machine, policy checks, idempotency records, quote lock, one-use instrument invariant, reconciliation, and audit events.
-- `src/adapters.js` defines replaceable funding, discovery, issuer, and checkout contracts. The default adapters return deterministic local fixtures and never need credentials.
+- `src/adapters.js` defines replaceable funding, discovery, issuer, and checkout contracts. The default adapters return deterministic local fixtures and never need credentials. The discovery contract receives the normalized task purchase and returns candidates; the issuer and checkout contracts receive only the locked scope.
 - `src/store.js` provides the single-host persistent store, atomic writes, reset behavior, and state-shape validation. No database service is required for this MVP.
 - `src/server.js` serves the JSON API and static operator console from one origin. The API is the integration boundary for a future brief.
 - `public/` contains the responsive six-stage operator experience: entry, funding, discovery and quote lock, issuance, execution, and outcome/audit.
 
-When the official problem arrives, adapt the narrowest surface possible: update the task brief and normalized candidate fixture, then add provider implementations behind the existing adapter contracts. Keep policy decisions in `src/domain.js`, keep secrets inside provider adapters, and preserve the task ceiling, exact quote lock, one-checkout rule, reconciliation stop, and redacted audit output until the new brief explicitly changes them.
+When the official competition requirements arrive, replace the narrowest adapter implementation rather than the workspace or state machine. Implement the funding verifier, discovery provider, issuer, and checkout provider behind the contracts in `src/adapters.js`, normalize external responses at that boundary, and keep credentials inside the provider adapter process. Update the task brief and candidate normalization only where the official contract requires it. Keep policy decisions in `src/domain.js`, and preserve the task ceiling, exact quote lock, one-checkout rule, reconciliation stop, and redacted audit output until the new brief explicitly changes them. Live integrations should be opt-in and credentialed; mock mode remains the safe local default.
 
 The operator console never receives sensitive payment credentials, wallet keys, identity documents, or model transcripts. Funding evidence and card-spendable settlement remain separate fields and separate audit facts.
 

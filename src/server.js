@@ -69,8 +69,28 @@ function routeApi(service, req, res, url) {
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
     return readBody(req).then((body) => {
-      const scenario = body && typeof body === 'object' && Object.hasOwn(body, 'scenario') ? body.scenario : 'happy';
-      return json(res, 201, { task: service.createTask({ scenario }) });
+      if (body !== null && (typeof body !== 'object' || Array.isArray(body))) {
+        throw new DomainError(400, 'INVALID_TASK_REQUEST', 'Task request must be a JSON object.');
+      }
+      const request = body || {};
+      if (request.currency !== undefined && request.currency !== 'XSGD') {
+        throw new DomainError(422, 'UNSUPPORTED_CURRENCY', 'NaviPay local tasks use XSGD only.');
+      }
+      const task = service.createTask({
+        scenario: request.scenario === undefined ? 'happy' : request.scenario,
+        origin: request.origin || 'operator',
+        merchant: request.merchant,
+        item: request.item,
+        amount: request.amount,
+        amountMinor: request.amountMinor
+      });
+      return json(res, 201, { task });
+    });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'replay' && method === 'POST') {
+    return readBody(req).then(() => {
+      const result = service.replayTask(segments[2], idempotencyKey(req, `browser-replay-${segments[2]}`));
+      return json(res, result.statusCode, result.body);
     });
   }
   if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {

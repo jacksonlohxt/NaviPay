@@ -12,6 +12,15 @@ function stableReference(prefix, input) {
   return `${prefix}-${crypto.createHash('sha256').update(input).digest('hex').slice(0, 10).toUpperCase()}`;
 }
 
+function merchantDomain(merchant) {
+  const slug = String(merchant || 'merchant')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48) || 'merchant';
+  return slug === 'harbor-supply' ? 'merchant.test' : `${slug}.test`;
+}
+
 /**
  * Replaceable provider contracts. The default implementations intentionally
  * return deterministic fixtures so the local demo never needs credentials.
@@ -58,42 +67,49 @@ class MockDiscoveryAdapter {
     this.calls = 0;
   }
 
-  discover({ scenario = 'happy' } = {}) {
+  discover({ scenario = 'happy', purchase } = {}) {
     this.calls += 1;
     if (scenario === 'discovery-failure') {
       throw new AdapterError('DISCOVERY_UNAVAILABLE', 'The simulated catalog is unavailable.');
     }
 
     const overCap = scenario === 'over-cap';
+    const requested = purchase || { merchant: 'Harbor Supply', item: 'Anker 737 Power Bank', amountMinor: 8950 };
     const expiresAt = new Date(this.clock().getTime() + 15 * 60 * 1000).toISOString();
-    const totalMinor = overCap ? 125000 : 8950;
+    const totalMinor = overCap ? 125000 : requested.amountMinor;
+    const merchant = requested.merchant;
+    const item = requested.item;
+    const domain = merchantDomain(merchant);
+    const shippingMinor = Math.min(450, Math.max(0, Math.floor(totalMinor / 10)));
+    const taxMinor = Math.min(200, Math.max(0, Math.floor(totalMinor / 20)));
     const candidate = {
-      id: overCap ? 'fixture-over-cap' : 'fixture-power-bank',
-      merchant: 'Harbor Supply',
-      merchantDomain: 'merchant.test',
-      item: 'Anker 737 Power Bank',
-      variant: '24,000 mAh / black',
-      subtotalMinor: totalMinor - 650,
-      shippingMinor: 450,
-      taxMinor: 200,
+      id: overCap ? 'fixture-over-cap' : `fixture-${stableReference('ITEM', `${merchant}:${item}:${totalMinor}`).toLowerCase()}`,
+      merchant,
+      merchantDomain: domain,
+      item,
+      variant: 'Requested configuration',
+      subtotalMinor: totalMinor - shippingMinor - taxMinor,
+      shippingMinor,
+      taxMinor,
       totalMinor,
       currency: 'XSGD',
       expiresAt,
-      selectionReason: overCap ? 'Fixture used to prove the hard ceiling.' : 'Lowest total with a confirmed local delivery window.'
+      selectionReason: overCap ? 'Fixture used to prove the hard ceiling.' : 'Requested item and amount from the operator task.'
     };
+    const alternateTotal = totalMinor + 1000;
     const alternate = {
-      id: 'fixture-power-bank-alt',
-      merchant: 'Harbor Supply',
-      merchantDomain: 'merchant.test',
-      item: 'Anker 737 Power Bank',
-      variant: '24,000 mAh / white',
-      subtotalMinor: 9300,
-      shippingMinor: 450,
-      taxMinor: 200,
-      totalMinor: 9950,
+      id: `${candidate.id}-alt`,
+      merchant,
+      merchantDomain: domain,
+      item,
+      variant: 'Alternate configuration',
+      subtotalMinor: alternateTotal - shippingMinor - taxMinor,
+      shippingMinor,
+      taxMinor,
+      totalMinor: alternateTotal,
       currency: 'XSGD',
       expiresAt,
-      selectionReason: 'Alternate color, same merchant.'
+      selectionReason: 'Alternate configuration from the same merchant.'
     };
     return {
       mode: 'mock',

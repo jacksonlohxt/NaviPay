@@ -325,6 +325,81 @@ test('reset returns one seeded task and clears prior audit and idempotency state
   assert.equal(Object.keys(service.store.data.idempotency).length, 0);
 });
 
+test('creates a normalized operator purchase, validates the amount, and persists history', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'navipay-task-'));
+  const filePath = path.join(directory, 'state.json');
+  try {
+    const store = new JsonStore(filePath);
+    const service = new NaviPayService({
+      store,
+      clock: makeClock(),
+      fundingAdapter: new MockFundingAdapter(),
+      discoveryAdapter: new MockDiscoveryAdapter(),
+      issuerAdapter: new MockIssuerAdapter(),
+      checkoutAdapter: new MockCheckoutAdapter()
+    });
+    const task = service.createTask({ merchant: 'Acme & Co', item: 'Desk lamp', amount: '42.50' });
+    assert.deepEqual(task.purchase, { merchant: 'Acme & Co', item: 'Desk lamp', amountMinor: 4250, currency: 'XSGD' });
+    assert.equal(service.listTasks().length, 1);
+    assert.equal(new JsonStore(filePath).data.tasks[task.id].purchase.amountMinor, 4250);
+    assert.throws(() => service.createTask({ merchant: 'Acme', item: 'Desk lamp', amount: '12.345' }), (error) => error.code === 'INVALID_AMOUNT');
+    assert.throws(() => service.createTask({ merchant: 'Acme', item: 'Desk lamp', amount: '1000.01' }), (error) => error.code === 'AMOUNT_EXCEEDS_CEILING');
+    assert.throws(() => service.createTask({ merchant: 'Acme', item: 'Desk lamp', amount: '0.00' }), (error) => error.code === 'INVALID_AMOUNT');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('safe replay preserves terminal history and blocks unresolved unknown checkout', () => {
+  const { service } = makeService();
+  const completed = service.createTask({ merchant: 'Acme', item: 'Desk lamp', amount: '42.50' });
+  const completedInstrument = runToInstrument(service, completed, 'safe-replay');
+  assert.equal(service.executeCheckout(completedInstrument.id, 'safe-replay-checkout').body.task.state, 'completed');
+
+  const replay = service.replayTask(completed.id, 'safe-replay-key');
+  assert.equal(replay.statusCode, 201);
+  assert.equal(replay.body.task.origin, 'replay');
+  assert.equal(replay.body.task.replayOf, completed.id);
+  assert.equal(replay.body.task.purchase.amountMinor, 4250);
+  assert.equal(service.getTask(completed.id).state, 'completed');
+  const replayAgain = service.replayTask(completed.id, 'safe-replay-key');
+  assert.equal(replayAgain.replayed, true);
+  assert.equal(replayAgain.body.task.id, replay.body.task.id);
+  assert.equal(service.listTasks().length, 2);
+
+  const unknown = service.createTask({ scenario: 'unknown-checkout' });
+  const unknownInstrument = runToInstrument(service, unknown, 'safe-unknown');
+  service.executeCheckout(unknownInstrument.id, 'safe-unknown-checkout');
+  const blocked = service.replayTask(unknown.id, 'safe-unknown-replay');
+  assert.equal(blocked.statusCode, 409);
+  assert.equal(blocked.body.error.code, 'UNKNOWN_CHECKOUT_REPLAY_BLOCKED');
+  assert.equal(service.listTasks().length, 3);
+});
+
+test('HTTP task workspace API rejects invalid input and returns persisted history', async () => {
+  const { service } = makeService();
+  const server = createServer({ service });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const invalid = await httpJson(base, '/api/tasks', { method: 'POST', body: JSON.stringify({ merchant: 'Acme', item: 'Desk lamp', amount: '1000.01' }) });
+    assert.equal(invalid.status, 422);
+    assert.equal(invalid.payload.error.code, 'AMOUNT_EXCEEDS_CEILING');
+    const created = await httpJson(base, '/api/tasks', { method: 'POST', body: JSON.stringify({ merchant: 'Acme', item: 'Desk lamp', amount: '42.50' }) });
+    assert.equal(created.status, 201);
+    assert.equal(created.payload.task.purchase.amountMinor, 4250);
+    const history = await httpJson(base, '/api/tasks');
+    assert.equal(history.status, 200);
+    assert.ok(history.payload.tasks.some((task) => task.id === created.payload.task.id));
+    const replayBeforeTerminal = await httpJson(base, `/api/tasks/${created.payload.task.id}/replay`, { method: 'POST', body: '{}' });
+    assert.equal(replayBeforeTerminal.status, 409);
+    assert.equal(replayBeforeTerminal.payload.error.code, 'TASK_NOT_REPLAYABLE');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('JSON store persists valid state and rejects malformed state', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'navipay-store-'));
   const filePath = path.join(directory, 'state.json');
