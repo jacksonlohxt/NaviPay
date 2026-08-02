@@ -1,0 +1,155 @@
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const { DomainError, NaviPayService } = require('./domain');
+const { JsonStore } = require('./store');
+
+const root = path.resolve(__dirname, '..');
+const publicDirectory = path.join(root, 'public');
+const dataFile = process.env.NAVIPAY_DATA_FILE || path.join(root, '.data', 'navipay.json');
+
+function json(res, statusCode, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff'
+  });
+  res.end(body);
+}
+
+function sendError(res, error) {
+  const statusCode = error instanceof DomainError ? error.statusCode : 500;
+  json(res, statusCode, {
+    error: {
+      code: error.code || 'INTERNAL_ERROR',
+      message: statusCode === 500 ? 'NaviPay could not complete that request.' : error.message,
+      details: error.details
+    }
+  });
+}
+
+async function readBody(req) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of req) {
+    length += chunk.length;
+    if (length > 100_000) throw new DomainError(413, 'REQUEST_TOO_LARGE', 'Request body is too large.');
+    chunks.push(chunk);
+  }
+  if (!chunks.length) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new DomainError(400, 'INVALID_JSON', 'Request body must be valid JSON.');
+  }
+}
+
+function idempotencyKey(req, fallback) {
+  return req.headers['idempotency-key'] || fallback;
+}
+
+function makeService() {
+  const service = new NaviPayService({ store: new JsonStore(dataFile) });
+  service.ensureSeedTask();
+  return service;
+}
+
+function routeApi(service, req, res, url) {
+  const segments = url.pathname.split('/').filter(Boolean);
+  const method = req.method || 'GET';
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
+    return json(res, 200, { tasks: service.listTasks() });
+  }
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
+    return readBody(req).then((body) => json(res, 201, { task: service.createTask({ scenario: body.scenario || 'happy' }) }));
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
+    return json(res, 200, { task: service.getTask(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'audit' && method === 'GET') {
+    return json(res, 200, { events: service.getAudit(segments[2]) });
+  }
+  if (segments.length < 4 || segments[0] !== 'api' || segments[1] !== 'tasks' || method !== 'POST') {
+    throw new DomainError(404, 'ROUTE_NOT_FOUND', 'API route not found.');
+  }
+
+  const taskId = segments[2];
+  const action = segments.slice(3).join('/');
+  const key = idempotencyKey(req, `browser-${action}`);
+  return readBody(req).then((body) => {
+    let result;
+    switch (action) {
+      case 'open':
+        result = service.openTask(taskId, key);
+        break;
+      case 'funding/verify':
+        result = service.verifyFunding(taskId, key);
+        break;
+      case 'discovery':
+        result = service.discover(taskId, key);
+        break;
+      case 'quote/lock':
+        result = service.lockQuote(taskId, key, body.candidateId);
+        break;
+      case 'policy/approve':
+        result = service.approvePolicy(taskId, key);
+        break;
+      case 'instrument/issue':
+        result = service.issueInstrument(taskId, key);
+        break;
+      case 'checkout/execute':
+        result = service.executeCheckout(taskId, key);
+        break;
+      case 'checkout/reconcile':
+        result = service.reconcileCheckout(taskId, key, body.resolution);
+        break;
+      default:
+        throw new DomainError(404, 'ROUTE_NOT_FOUND', 'API route not found.');
+    }
+    return json(res, result.statusCode, result.body);
+  });
+}
+
+function staticFile(res, pathname) {
+  const requested = pathname === '/' ? '/index.html' : pathname;
+  const filePath = path.resolve(publicDirectory, `.${requested}`);
+  if (!filePath.startsWith(`${publicDirectory}${path.sep}`)) return false;
+  const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return false;
+  res.writeHead(200, {
+    'Content-Type': contentTypes[path.extname(filePath)] || 'application/octet-stream',
+    'Cache-Control': 'no-cache',
+    'X-Content-Type-Options': 'nosniff'
+  });
+  fs.createReadStream(filePath).pipe(res);
+  return true;
+}
+
+function createServer({ service = makeService() } = {}) {
+  return http.createServer((req, res) => {
+    const url = new URL(req.url || '/', 'http://localhost');
+    Promise.resolve()
+      .then(() => {
+        if (url.pathname.startsWith('/api/')) return routeApi(service, req, res, url);
+        if (req.method !== 'GET' || !staticFile(res, url.pathname)) {
+          if (!res.headersSent) json(res, 404, { error: { code: 'NOT_FOUND', message: 'Page not found.' } });
+        }
+      })
+      .catch((error) => {
+        if (!res.headersSent) sendError(res, error);
+      });
+  });
+}
+
+if (require.main === module) {
+  const port = Number(process.env.PORT || 3000);
+  const server = createServer();
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`NaviPay demo running at http://127.0.0.1:${port}`);
+    console.log(`Persistent local store: ${dataFile}`);
+  });
+}
+
+module.exports = { createServer, makeService };

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102a27">
+  <title>NaviPay - purchase control plane</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="NaviPay home">
+        <span class="brand-mark" aria-hidden="true">N</span>
+        <span><strong>NaviPay</strong><small>purchase control plane</small></span>
+      </a>
+      <div class="topbar-actions">
+        <span class="mode-badge mode-badge-dark"><span class="mode-dot"></span> DEMO / MOCK PROVIDERS</span>
+        <button class="button button-quiet" id="new-run" type="button">New demo run</button>
+      </div>
+    </header>
+
+    <main id="app" class="main-content">
+      <section class="loading-state" aria-live="polite"><span class="spinner"></span> Loading assigned task…</section>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
