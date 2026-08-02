@@ -1,4 +1,13 @@
 const STAGES = ['Entry', 'Funding', 'Discovery', 'Issuance', 'Execution', 'Outcome'];
+const SCENARIOS = [
+  ['happy', 'Happy path'],
+  ['over-cap', 'Over-cap policy failure'],
+  ['unknown-checkout', 'Unknown checkout / reconcile'],
+  ['checkout-failure', 'Merchant decline'],
+  ['issuer-failure', 'Issuer failure'],
+  ['funding-failure', 'Funding verifier failure'],
+  ['discovery-failure', 'Discovery failure']
+];
 const state = { task: null, audit: [], busy: false, error: null, selectedCandidate: null };
 const app = document.querySelector('#app');
 
@@ -7,13 +16,15 @@ function escapeHtml(value) {
 }
 
 function formatMoney(minor, currency = 'XSGD') {
-  if (minor === null || minor === undefined) return '-';
+  if (!Number.isFinite(minor)) return '-';
   return `${currency} ${(minor / 100).toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatDate(value) {
   if (!value) return '-';
-  return new Intl.DateTimeFormat('en-SG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Unknown time';
+  return new Intl.DateTimeFormat('en-SG', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
 function shortId(value) {
@@ -23,6 +34,14 @@ function shortId(value) {
 
 function modeBadge(extra = '') {
   return `<span class="mode-badge mode-badge-light"><span class="mode-dot"></span> MOCK / SIMULATED${extra ? ` · ${escapeHtml(extra)}` : ''}</span>`;
+}
+
+function scenarioLabel(scenario) {
+  return SCENARIOS.find(([value]) => value === scenario)?.[1] || 'Unknown scenario';
+}
+
+function scenarioOptions(selected) {
+  return SCENARIOS.map(([value, label]) => `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('');
 }
 
 function statePill(value) {
@@ -47,13 +66,22 @@ function currentStage(task) {
   return 0;
 }
 
+function failedStage(task) {
+  if (task.state !== 'failed') return null;
+  return { funding: 1, discovery: 2, policy: 3, issuance: 3, checkout: 4 }[task.failure?.stage] ?? 5;
+}
+
 function stageRail(task) {
   const active = currentStage(task);
+  const failed = failedStage(task);
   return `<nav class="stage-rail" aria-label="Purchase lifecycle stages">${STAGES.map((label, index) => {
-    const complete = index < active;
+    const complete = failed === null ? index < active : index < failed;
     const current = index === active;
-    return `<div class="stage-item${complete ? ' is-complete' : ''}"${current ? ' aria-current="step"' : ''}>
-      <span class="stage-number">${complete ? '✓' : String(index + 1).padStart(2, '0')}</span><span class="stage-label">${label}</span>
+    const isFailed = index === failed;
+    const pending = failed !== null && index > failed && index < active;
+    const classes = [complete ? 'is-complete' : '', isFailed ? 'is-failed' : '', pending ? 'is-pending' : ''].filter(Boolean).join(' ');
+    return `<div class="stage-item ${classes}"${current ? ' aria-current="step"' : ''}>
+      <span class="stage-number">${complete ? '✓' : (isFailed ? '!' : String(index + 1).padStart(2, '0'))}</span><span class="stage-label">${label}</span>
     </div>`;
   }).join('')}</nav>`;
 }
@@ -68,7 +96,7 @@ function hero(task) {
     ['Execute once, with a scrubbed activity trail', 'The mock merchant receives only the locked scope. Unknown results stop for reconciliation.'],
     ['Show what financially happened', 'Authorization, capture, retirement, and redacted audit evidence stay distinct.']
   ];
-  return `<section class="hero"><div><p class="eyebrow">Operator console / stage ${String(active + 1).padStart(2, '0')} of 06</p><h1>${titles[active][0]}</h1><p class="lede">${titles[active][1]}</p></div><div class="hero-meta"><div class="hero-meta-label">Immutable task ceiling</div><div class="hero-meta-value">${formatMoney(task.spendingCeilingMinor, task.currency)}</div><div class="hero-meta-detail">One merchant · one capture · expires with the quote</div></div></section>`;
+  return `<section class="hero" aria-labelledby="page-title"><div><p class="eyebrow">Operator console / stage ${String(active + 1).padStart(2, '0')} of 06</p><h1 id="page-title" tabindex="-1">${titles[active][0]}</h1><p class="lede">${titles[active][1]}</p></div><div class="hero-meta"><div class="hero-meta-label">Immutable task ceiling</div><div class="hero-meta-value">${formatMoney(task.spendingCeilingMinor, task.currency)}</div><div class="hero-meta-detail">${escapeHtml(scenarioLabel(task.scenario))} · one merchant · one capture</div></div></section>`;
 }
 
 function notice() {
@@ -76,10 +104,11 @@ function notice() {
 }
 
 function taskBrief(task) {
-  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">01 / Entry</div><h2>Assigned purchase brief</h2><p>A single task, with no wallet or reusable card surface.</p></div>${modeBadge('entry')}</div>
-    <div class="brief-grid">${dataCell('Task reference', shortId(task.id))}${dataCell('Agent authority', 'Assigned purchase only')}${dataCell('Requested item', 'Anker 737 Power Bank')}${dataCell('Currency', task.currency)}${dataCell('Spending ceiling', formatMoney(task.spendingCeilingMinor, task.currency))}${dataCell('Task state', task.state.replaceAll('_', ' '))}</div>
-    <div class="locked-callout"><strong>What will happen</strong><p>Verify the fixture evidence, choose one quote, pass server policy, issue one scoped instrument, then execute one mock checkout.</p></div>
-    <div class="action-row">${actionButton('Open assigned task', 'open-task', 'button-lime')}<p class="action-help">Opening records an audit event. It does not authorize a payment.</p></div>
+  const heading = task.origin === 'seed' ? 'Seeded purchase brief' : 'Assigned purchase brief';
+  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">01 / Entry</div><h2>${heading}</h2><p>A single task, with no wallet or reusable card surface.</p></div>${modeBadge('entry')}</div>
+    <div class="brief-grid">${dataCell('Task reference', shortId(task.id))}${dataCell('Run type', task.origin === 'seed' ? 'Seeded local run' : 'Isolated demo run')}${dataCell('Agent authority', 'Assigned purchase only')}${dataCell('Demo scenario', scenarioLabel(task.scenario))}${dataCell('Requested item', 'Anker 737 Power Bank')}${dataCell('Currency', task.currency)}${dataCell('Spending ceiling', formatMoney(task.spendingCeilingMinor, task.currency))}${dataCell('Task state', task.state.replaceAll('_', ' '))}</div>
+    <div class="locked-callout"><strong>Start here</strong><p>Verify fixture evidence, choose one quote, pass server policy, issue one scoped instrument, then execute one mock checkout. Opening records an audit event, but does not authorize a payment.</p></div>
+    <div class="action-row">${actionButton('Open assigned task', 'open-task', 'button-lime')}<p class="action-help">The next step will verify funding evidence.</p></div>
   </article>`;
 }
 
@@ -142,14 +171,16 @@ function outcomePanel(task) {
     : unknown
       ? 'The provider result is unknown. NaviPay has blocked automatic replay. Confirm the provider result before resolving.'
       : (task.failure?.message || 'The lifecycle ended without an authorization.');
-  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">06 / Outcome + audit</div><h2>Financial truth, not a green guess</h2><p>Authorization, capture, retirement, and reconciliation remain explicit.</p></div>${modeBadge('outcome')}</div><div class="outcome-banner${success ? '' : (unknown ? ' warning' : ' error')}" role="status"><h2>${title}</h2><p>${escapeHtml(message)}</p></div><div class="outcome-meta">${dataCell('Lifecycle state', task.state.replaceAll('_', ' '))}${dataCell('Outcome', outcome.label || task.failure?.code || 'No authorization')}${dataCell('Checkout reference', shortId(task.checkout?.checkoutReference))}${dataCell('Authority status', task.instrument?.status || 'Not issued')}</div>${unknown ? `<div class="action-row"><button type="button" class="button button-lime" data-action="reconcile-authorized"${state.busy ? ' disabled' : ''}>Reconcile as authorized</button><button type="button" class="button button-secondary" data-action="reconcile-declined"${state.busy ? ' disabled' : ''}>Reconcile as declined</button><p class="action-help">Resolution records a new event. It never retries checkout.</p></div>` : ''}${task.policy ? `<div><div class="panel-label" style="margin-top:1.25rem">Policy receipt</div>${policyChecks(task.policy)}</div>` : ''}<div class="audit"><div class="audit-header"><div><div class="panel-label">Append-only audit timeline</div><h3>Redacted evidence trail</h3></div><p>${state.audit.length} events · no sensitive payment material</p></div><ol class="audit-list">${state.audit.slice().reverse().map((event) => `<li class="audit-event event-${escapeHtml(event.status)}"><span class="event-dot"></span><span><div class="audit-summary">${escapeHtml(event.summary)}</div><div class="audit-type">${escapeHtml(event.type)}</div></span><time class="audit-time">${formatDate(event.occurredAt)}</time></li>`).join('')}</ol></div></article>`;
+  const failureTitles = { policy: 'Policy stopped before issuance', issuance: 'Scoped instrument was not issued', funding: 'Funding evidence could not be verified', discovery: 'Discovery could not return a quote', checkout: 'Checkout stopped safely' };
+  const terminalTitle = failureTitles[task.failure?.stage] || 'Task stopped safely';
+  return `<article class="card card-pad"><div class="card-header"><div><div class="panel-label">06 / Outcome + audit</div><h2>Financial truth, not a green guess</h2><p>Authorization, capture, retirement, and reconciliation remain explicit.</p></div>${modeBadge('outcome')}</div><div class="outcome-banner${success ? '' : (unknown ? ' warning' : ' error')}" role="${success || unknown ? 'status' : 'alert'}" aria-live="polite"><h2>${success ? title : (unknown ? title : terminalTitle)}</h2><p>${escapeHtml(message)}</p></div><div class="outcome-meta">${dataCell('Lifecycle state', task.state.replaceAll('_', ' '))}${dataCell('Outcome', outcome.label || task.failure?.code || 'No authorization')}${dataCell('Checkout reference', shortId(task.checkout?.checkoutReference))}${dataCell('Authority status', task.instrument?.status || 'Not issued')}</div>${unknown ? `<div class="action-row"><button type="button" class="button button-lime" data-action="reconcile-authorized"${state.busy ? ' disabled' : ''}>Reconcile as authorized</button><button type="button" class="button button-secondary" data-action="reconcile-declined"${state.busy ? ' disabled' : ''}>Reconcile as declined</button><p class="action-help">Resolution records a new event. It never retries checkout.</p></div>` : ''}${task.policy ? `<div><div class="panel-label" style="margin-top:1.25rem">Policy receipt</div>${policyChecks(task.policy)}</div>` : ''}<div class="audit"><div class="audit-header"><div><div class="panel-label">Append-only audit timeline</div><h3>Redacted evidence trail</h3></div><p>${state.audit.length} events · no sensitive payment material</p></div><ol class="audit-list">${state.audit.slice().reverse().map((event) => `<li class="audit-event event-${escapeHtml(event.status)}"><span class="event-dot"></span><span><div class="audit-summary">${escapeHtml(event.summary)}</div><div class="audit-type">${escapeHtml(event.type)}</div></span><time class="audit-time">${formatDate(event.occurredAt)}</time></li>`).join('')}</ol></div></article>`;
 }
 
 function guardrails(task) {
   const lockedTotal = task.quote?.lockedSnapshot?.totalMinor || 0;
   const ceiling = task.spendingCeilingMinor;
   const percentage = Math.min(100, Math.round((lockedTotal / ceiling) * 100));
-  return `<aside class="guardrail-stack"><article class="card guardrail-card"><div class="panel-label">Server guardrails</div><h2>Bounded by design</h2><ul class="guardrail-list"><li><span>Immutable ${formatMoney(ceiling, task.currency)} ceiling</span></li><li><span>Exact merchant and quote scope</span></li><li><span>One successful capture maximum</span></li><li><span>Unknown results require reconciliation</span></li><li><span>Audit entries are redacted and append-only</span></li></ul><div class="ceiling-meter"><div class="ceiling-meter-head"><span>Locked quote / ceiling</span><strong>${formatMoney(lockedTotal, task.currency)} / ${formatMoney(ceiling, task.currency)}</strong></div><div class="meter-track"><div class="meter-fill${lockedTotal > ceiling ? ' over' : ''}" style="width:${Math.max(lockedTotal ? 3 : 0, percentage)}%"></div></div></div></article><article class="card guardrail-card"><div class="panel-label">Mode disclosure</div><h2>What is simulated</h2><ul class="guardrail-list"><li><span>Funding verifier: Avalanche fixture</span></li><li><span>Discovery: local catalog fixture</span></li><li><span>Issuer: mock scoped instrument</span></li><li><span>Checkout: mock merchant</span></li></ul></article><article class="card guardrail-card scenario-card"><div class="panel-label">Judge scenarios</div><h2>Replay a known path</h2><p>New runs are isolated. The default happy path needs no credentials; failure fixtures prove stop conditions.</p><select class="scenario-select" id="scenario-select" aria-label="New demo scenario"><option value="happy">Happy path</option><option value="over-cap">Over-cap policy failure</option><option value="unknown-checkout">Unknown checkout / reconcile</option><option value="checkout-failure">Merchant decline</option><option value="issuer-failure">Issuer failure</option></select><div class="action-row">${actionButton('Start selected scenario', 'new-run', 'button-secondary')}</div></article></aside>`;
+  return `<aside class="guardrail-stack"><article class="card guardrail-card"><div class="panel-label">Server guardrails</div><h2>Bounded by design</h2><ul class="guardrail-list"><li><span>Immutable ${formatMoney(ceiling, task.currency)} ceiling</span></li><li><span>Exact merchant and quote scope</span></li><li><span>One successful capture maximum</span></li><li><span>Unknown results require reconciliation</span></li><li><span>Audit entries are redacted and append-only</span></li></ul><div class="ceiling-meter"><div class="ceiling-meter-head"><span>Locked quote / ceiling</span><strong>${formatMoney(lockedTotal, task.currency)} / ${formatMoney(ceiling, task.currency)}</strong></div><div class="meter-track" role="progressbar" aria-label="Locked quote against task ceiling" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percentage}"><div class="meter-fill${lockedTotal > ceiling ? ' over' : ''}" style="width:${Math.max(lockedTotal ? 3 : 0, percentage)}%"></div></div></div></article><article class="card guardrail-card"><div class="panel-label">Mode disclosure</div><h2>What is simulated</h2><ul class="guardrail-list"><li><span>Funding verifier: Avalanche fixture</span></li><li><span>Discovery: local catalog fixture</span></li><li><span>Issuer: mock scoped instrument</span></li><li><span>Checkout: mock merchant</span></li></ul></article><article class="card guardrail-card scenario-card"><div class="panel-label">Judge scenarios</div><h2>Replay a known path</h2><p>Choose an isolated deterministic run. Reset clears the local store and seeds a fresh happy path.</p><label class="select-label" for="scenario-select">Scenario</label><select class="scenario-select" id="scenario-select">${scenarioOptions(task.scenario)}</select><div class="action-row">${actionButton('Start selected scenario', 'new-run', 'button-secondary')}<button type="button" class="button button-secondary" data-action="reset-demo"${state.busy ? ' disabled' : ''}>Reset local demo</button></div></article></aside>`;
 }
 
 function stagePanel(task) {
@@ -165,7 +196,8 @@ function stagePanel(task) {
 function render() {
   if (!state.task) return;
   const task = state.task;
-  app.innerHTML = `${hero(task)}${notice()}${state.error ? `<div class="error-banner" role="alert"><strong>${escapeHtml(state.error.code || 'Action unavailable')}</strong><p>${escapeHtml(state.error.message)}</p></div>` : ''}${stageRail(task)}<div class="console-grid"><div>${stagePanel(task)}<p class="footer-note">NaviPay demo mode · local-only fixture · credentials and sensitive payment data stay outside the operator console.</p></div>${guardrails(task)}</div>`;
+  app.setAttribute('aria-busy', state.busy ? 'true' : 'false');
+  app.innerHTML = `${hero(task)}${notice()}${state.error ? `<div class="error-banner" id="action-error" tabindex="-1" role="alert"><strong>${escapeHtml(state.error.code || 'Action unavailable')}</strong><p>${escapeHtml(state.error.message)}</p></div>` : ''}${stageRail(task)}<div class="console-grid"><div>${stagePanel(task)}<p class="footer-note">NaviPay demo mode · local-only fixture · credentials and sensitive payment data stay outside the operator console.</p></div>${guardrails(task)}</div>`;
   bindEvents();
 }
 
@@ -207,7 +239,7 @@ async function perform(action, path, body = {}) {
   } finally {
     state.busy = false;
     render();
-    document.querySelector('h1')?.focus?.();
+    focusAfterAction();
   }
 }
 
@@ -225,7 +257,39 @@ async function startNewRun(scenario) {
   } finally {
     state.busy = false;
     render();
+    focusAfterAction();
   }
+}
+
+async function resetDemo() {
+  state.busy = true;
+  state.error = null;
+  render();
+  try {
+    const payload = await api('/api/reset', { method: 'POST', body: '{}' });
+    state.task = payload.task;
+    state.selectedCandidate = null;
+    await refreshAudit();
+  } catch (error) {
+    state.error = { code: error.code, message: error.message };
+  } finally {
+    state.busy = false;
+    render();
+    focusAfterAction();
+  }
+}
+
+function focusAfterAction() {
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  const target = document.querySelector('#action-error') || document.querySelector('#page-title');
+  target?.focus?.({ preventScroll: true });
+}
+
+function alignStageRail() {
+  const rail = document.querySelector('.stage-rail');
+  const current = rail?.querySelector('[aria-current="step"]');
+  if (!rail || !current || rail.scrollWidth <= rail.clientWidth) return;
+  rail.scrollLeft = Math.max(0, current.offsetLeft - (rail.clientWidth - current.offsetWidth));
 }
 
 function bindEvents() {
@@ -248,8 +312,10 @@ function bindEvents() {
     if (action === 'reconcile-authorized') return perform(action, `/api/tasks/${id}/checkout/reconcile`, { resolution: 'authorized' });
     if (action === 'reconcile-declined') return perform(action, `/api/tasks/${id}/checkout/reconcile`, { resolution: 'declined' });
     if (action === 'new-run') return startNewRun(document.querySelector('#scenario-select')?.value || 'happy');
+    if (action === 'reset-demo') return resetDemo();
   }));
   document.querySelector('#new-run')?.addEventListener('click', () => startNewRun(document.querySelector('#scenario-select')?.value || 'happy'));
+  alignStageRail();
 }
 
 async function boot() {
@@ -267,4 +333,5 @@ async function boot() {
   }
 }
 
+window.addEventListener('resize', alignStageRail);
 boot();

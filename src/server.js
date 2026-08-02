@@ -14,7 +14,9 @@ function json(res, statusCode, payload) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff'
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer'
   });
   res.end(body);
 }
@@ -59,11 +61,17 @@ function makeService() {
 function routeApi(service, req, res, url) {
   const segments = url.pathname.split('/').filter(Boolean);
   const method = req.method || 'GET';
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'reset' && method === 'POST') {
+    return readBody(req).then(() => json(res, 200, { task: service.reset() }));
+  }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
     return json(res, 200, { tasks: service.listTasks() });
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
-    return readBody(req).then((body) => json(res, 201, { task: service.createTask({ scenario: body.scenario || 'happy' }) }));
+    return readBody(req).then((body) => {
+      const scenario = body && typeof body === 'object' && Object.hasOwn(body, 'scenario') ? body.scenario : 'happy';
+      return json(res, 201, { task: service.createTask({ scenario }) });
+    });
   }
   if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
     return json(res, 200, { task: service.getTask(segments[2]) });
@@ -91,7 +99,7 @@ function routeApi(service, req, res, url) {
         result = service.discover(taskId, key);
         break;
       case 'quote/lock':
-        result = service.lockQuote(taskId, key, body.candidateId);
+        result = service.lockQuote(taskId, key, body?.candidateId);
         break;
       case 'policy/approve':
         result = service.approvePolicy(taskId, key);
@@ -103,7 +111,7 @@ function routeApi(service, req, res, url) {
         result = service.executeCheckout(taskId, key);
         break;
       case 'checkout/reconcile':
-        result = service.reconcileCheckout(taskId, key, body.resolution);
+        result = service.reconcileCheckout(taskId, key, body?.resolution);
         break;
       default:
         throw new DomainError(404, 'ROUTE_NOT_FOUND', 'API route not found.');
@@ -121,7 +129,9 @@ function staticFile(res, pathname) {
   res.writeHead(200, {
     'Content-Type': contentTypes[path.extname(filePath)] || 'application/octet-stream',
     'Cache-Control': 'no-cache',
-    'X-Content-Type-Options': 'nosniff'
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer'
   });
   fs.createReadStream(filePath).pipe(res);
   return true;

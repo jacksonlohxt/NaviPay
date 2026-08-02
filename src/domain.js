@@ -31,6 +31,65 @@ function money(minor, currency = CURRENCY) {
   return `${currency} ${(minor / 100).toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function isText(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isMinor(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+function isTimestamp(value) {
+  return isText(value) && Number.isFinite(Date.parse(value));
+}
+
+function contractError(code, message) {
+  return new AdapterError(code, message);
+}
+
+function validateFundingEvidence(evidence, currency) {
+  const onChain = evidence?.onChain;
+  const settlement = evidence?.settlement;
+  if (!evidence || !isText(evidence.mode) || !isText(evidence.source) || !onChain || onChain.status !== 'verified' || onChain.asset !== currency || !isMinor(onChain.amountMinor) || !isText(onChain.network) || !isText(onChain.transactionReference) || !isTimestamp(onChain.observedAt) || !settlement || !isText(settlement.status) || typeof settlement.spendable !== 'boolean') {
+    throw contractError('INVALID_FUNDING_RESULT', 'The funding adapter returned incomplete verification evidence.');
+  }
+}
+
+function validateCandidate(candidate, currency) {
+  return candidate && isText(candidate.id) && isText(candidate.merchant) && isText(candidate.merchantDomain) && isText(candidate.item) && isText(candidate.variant) && isMinor(candidate.subtotalMinor) && isMinor(candidate.shippingMinor) && isMinor(candidate.taxMinor) && isMinor(candidate.totalMinor) && candidate.totalMinor === candidate.subtotalMinor + candidate.shippingMinor + candidate.taxMinor && candidate.currency === currency && isTimestamp(candidate.expiresAt);
+}
+
+function validateDiscoveryResult(result, currency) {
+  if (!result || !isText(result.mode) || !isText(result.source) || !isTimestamp(result.discoveredAt) || !Array.isArray(result.candidates) || result.candidates.length === 0 || !isText(result.recommendedCandidateId) || !result.candidates.some((candidate) => candidate.id === result.recommendedCandidateId) || result.candidates.some((candidate) => !validateCandidate(candidate, currency))) {
+    throw contractError('INVALID_DISCOVERY_RESULT', 'The discovery adapter returned an incomplete or inconsistent quote set.');
+  }
+}
+
+function validateIssuedInstrument(issued, locked) {
+  const scope = issued?.scope;
+  if (!issued || !isText(issued.mode) || !isText(issued.reference) || issued.status !== 'active' || !isTimestamp(issued.issuedAt) || !scope || scope.merchant !== locked.merchant || scope.merchantDomain !== locked.merchantDomain || scope.item !== locked.item || scope.variant !== locked.variant || scope.amountMinor !== locked.totalMinor || scope.currency !== locked.currency || scope.expiresAt !== locked.expiresAt || scope.maxCaptures !== 1 || scope.reusable !== false) {
+    throw contractError('INVALID_ISSUER_RESULT', 'The issuer adapter returned an instrument outside the locked purchase scope.');
+  }
+}
+
+function validateCheckoutResult(result, scope) {
+  const validStatuses = new Set(['authorized', 'unknown', 'declined']);
+  const baseValid = result && validStatuses.has(result.status) && isText(result.mode) && isText(result.merchantDomain) && isMinor(result.amountMinor) && isText(result.currency) && isTimestamp(result.attemptedAt) && isText(result.checkoutReference);
+  if (!baseValid) throw contractError('INVALID_CHECKOUT_RESULT', 'The checkout adapter returned an unsupported or incomplete result.');
+  if (result.merchantDomain !== scope.merchantDomain || result.amountMinor !== scope.amountMinor || result.currency !== scope.currency) {
+    throw contractError('CHECKOUT_SCOPE_MISMATCH', 'The checkout result did not match the locked merchant, amount, or currency.');
+  }
+  if (result.status === 'authorized' && (!isText(result.authorizationReference) || !isText(result.captureReference) || !isTimestamp(result.capturedAt))) {
+    throw contractError('INVALID_CHECKOUT_RESULT', 'An authorized checkout result must include authorization and capture references.');
+  }
+  if (result.status === 'unknown' && !isText(result.message)) {
+    throw contractError('INVALID_CHECKOUT_RESULT', 'An unknown checkout result must explain why reconciliation is required.');
+  }
+  if (result.status === 'declined' && !isText(result.reason)) {
+    throw contractError('INVALID_CHECKOUT_RESULT', 'A declined checkout result must include a reason.');
+  }
+}
+
 function publicTask(task) {
   return clone(task);
 }
@@ -74,7 +133,7 @@ class NaviPayService {
     this.checkoutAdapter = checkoutAdapter;
   }
 
-  createTask({ scenario = 'happy' } = {}) {
+  createTask({ scenario = 'happy', origin = 'operator' } = {}) {
     if (!SCENARIOS.has(scenario)) {
       throw new DomainError(400, 'INVALID_SCENARIO', `Unknown demo scenario: ${scenario}.`);
     }
@@ -82,6 +141,7 @@ class NaviPayService {
       id: newId('task'),
       createdAt: this.clock().toISOString(),
       updatedAt: this.clock().toISOString(),
+      origin,
       scenario,
       mode: 'demo / mock',
       currency: CURRENCY,
@@ -108,8 +168,13 @@ class NaviPayService {
 
   ensureSeedTask() {
     const tasks = this.listTasks();
-    if (tasks.length === 0) return this.createTask();
+    if (tasks.length === 0) return this.createTask({ origin: 'seed' });
     return tasks[0];
+  }
+
+  reset() {
+    this.store.reset();
+    return this.ensureSeedTask();
   }
 
   listTasks() {
@@ -129,8 +194,8 @@ class NaviPayService {
     return clone(this.store.data.auditEvents.filter((event) => event.taskId === taskId));
   }
 
-  _action(taskId, action, idempotencyKey, handler) {
-    if (!idempotencyKey || idempotencyKey.length > 200) {
+  _action(taskId, action, idempotencyKey, handler, requestFingerprint = '') {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) {
       throw new DomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide a short Idempotency-Key for this action.');
     }
     return this.store.transaction((data) => {
@@ -139,6 +204,19 @@ class NaviPayService {
       const storedKey = actionKey(taskId, action, idempotencyKey);
       const previous = data.idempotency[storedKey];
       if (previous) {
+        if (previous.requestFingerprint && previous.requestFingerprint !== requestFingerprint) {
+          return {
+            statusCode: 409,
+            body: {
+              error: {
+                code: 'IDEMPOTENCY_KEY_REUSED',
+                message: 'Use a new Idempotency-Key when the action input changes.'
+              },
+              task: publicTask(task)
+            },
+            replayed: false
+          };
+        }
         return { ...clone(previous.response), replayed: true };
       }
 
@@ -148,7 +226,7 @@ class NaviPayService {
       } catch (error) {
         const normalized = error instanceof DomainError
           ? error
-          : new DomainError(502, 'ADAPTER_ERROR', error.message || 'The adapter did not complete.');
+          : new DomainError(502, 'ADAPTER_ERROR', error?.message || 'The adapter did not complete.');
         response = {
           statusCode: normalized.statusCode,
           body: {
@@ -163,6 +241,7 @@ class NaviPayService {
       }
       data.idempotency[storedKey] = {
         createdAt: this.clock().toISOString(),
+        requestFingerprint,
         response: clone(response)
       };
       return { ...response, replayed: false };
@@ -188,6 +267,7 @@ class NaviPayService {
       }
       try {
         const evidence = this.fundingAdapter.verify({ taskId, scenario: task.scenario, currency: task.currency });
+        validateFundingEvidence(evidence, task.currency);
         task.funding = {
           verifiedAt: this.clock().toISOString(),
           mode: evidence.mode,
@@ -207,7 +287,7 @@ class NaviPayService {
         return { statusCode: 200, body: taskResponse(task) };
       } catch (error) {
         task.state = 'failed';
-        task.failure = { stage: 'funding', code: error.code || 'FUNDING_FAILED', message: error.message };
+        task.failure = { stage: 'funding', code: error?.code || 'FUNDING_FAILED', message: error?.message || 'The funding adapter did not complete.' };
         task.updatedAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'funding.failed', 'error', 'Funding evidence could not be verified.', {
           code: task.failure.code,
@@ -233,6 +313,7 @@ class NaviPayService {
       appendAudit(data, task.id, this.clock, 'discovery.started', 'info', 'Discovery started for the assigned item.', { mode: task.mode });
       try {
         const result = this.discoveryAdapter.discover({ taskId, scenario: task.scenario, currency: task.currency });
+        validateDiscoveryResult(result, task.currency);
         task.quote = {
           mode: result.mode,
           source: result.source,
@@ -254,7 +335,7 @@ class NaviPayService {
         return { statusCode: 200, body: taskResponse(task) };
       } catch (error) {
         task.state = 'failed';
-        task.failure = { stage: 'discovery', code: error.code || 'DISCOVERY_FAILED', message: error.message };
+        task.failure = { stage: 'discovery', code: error?.code || 'DISCOVERY_FAILED', message: error?.message || 'The discovery adapter did not complete.' };
         task.updatedAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'discovery.failed', 'error', 'Discovery did not return a quote.', { code: task.failure.code });
         return { statusCode: 502, body: { error: { code: task.failure.code, message: task.failure.message }, task: publicTask(task) } };
@@ -267,7 +348,9 @@ class NaviPayService {
       if (!task.quote) throw new DomainError(409, 'INVALID_TRANSITION', 'Discover a quote before locking it.');
       if (task.quote.locked) return { statusCode: 200, body: taskResponse(task) };
       if (task.state !== 'quoted') throw new DomainError(409, 'INVALID_TRANSITION', 'This quote is no longer available to lock.');
-      const candidate = task.quote.candidates.find((item) => item.id === candidateId) || task.quote.candidates.find((item) => item.id === task.quote.recommendedCandidateId);
+      const candidate = candidateId
+        ? task.quote.candidates.find((item) => item.id === candidateId)
+        : task.quote.candidates.find((item) => item.id === task.quote.recommendedCandidateId);
       if (!candidate) throw new DomainError(422, 'QUOTE_CANDIDATE_NOT_FOUND', 'Select one of the returned quote candidates.');
       if (candidate.currency !== task.currency) throw new DomainError(422, 'QUOTE_CURRENCY_MISMATCH', 'The quote currency does not match the task currency.');
       if (new Date(candidate.expiresAt).getTime() <= this.clock().getTime()) {
@@ -294,7 +377,7 @@ class NaviPayService {
         expiresAt: candidate.expiresAt
       });
       return { statusCode: 200, body: taskResponse(task) };
-    });
+    }, candidateId || '');
   }
 
   approvePolicy(taskId, idempotencyKey) {
@@ -356,7 +439,9 @@ class NaviPayService {
       task.updatedAt = this.clock().toISOString();
       appendAudit(data, task.id, this.clock, 'instrument.issuing', 'info', 'Issuing a task-scoped mock instrument.', { mode: task.mode });
       try {
-        const issued = this.issuerAdapter.issue({ taskId, scenario: task.scenario, scope: task.quote.lockedSnapshot });
+        const locked = task.quote.lockedSnapshot;
+        const issued = this.issuerAdapter.issue({ taskId, scenario: task.scenario, scope: { ...locked, amountMinor: locked.totalMinor } });
+        validateIssuedInstrument(issued, locked);
         task.instrument = {
           mode: issued.mode,
           reference: issued.reference,
@@ -377,7 +462,7 @@ class NaviPayService {
         return { statusCode: 200, body: taskResponse(task) };
       } catch (error) {
         task.state = 'failed';
-        task.failure = { stage: 'issuance', code: error.code || 'ISSUANCE_FAILED', message: error.message };
+        task.failure = { stage: 'issuance', code: error?.code || 'ISSUANCE_FAILED', message: error?.message || 'The issuer adapter did not complete.' };
         task.updatedAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'instrument.failed', 'error', 'The scoped instrument was not issued.', { code: task.failure.code });
         return { statusCode: 502, body: { error: { code: task.failure.code, message: task.failure.message }, task: publicTask(task) } };
@@ -397,15 +482,19 @@ class NaviPayService {
         merchantDomain: task.instrument.scope.merchantDomain,
         amount: money(task.instrument.scope.amountMinor, task.instrument.scope.currency)
       });
+      const scope = task.instrument.scope;
       let result;
       try {
-        result = this.checkoutAdapter.execute({ taskId, scenario: task.scenario, scope: task.instrument.scope });
+        result = this.checkoutAdapter.execute({ taskId, scenario: task.scenario, scope });
+        validateCheckoutResult(result, scope);
       } catch (error) {
         task.state = 'failed';
-        task.failure = { stage: 'checkout', code: error.code || 'CHECKOUT_ADAPTER_FAILED', message: error.message || 'The checkout adapter failed before returning a result.' };
+        task.failure = { stage: 'checkout', code: error?.code || 'CHECKOUT_ADAPTER_FAILED', message: error?.message || 'The checkout adapter failed before returning a result.' };
         task.outcome = { status: 'declined', label: 'Checkout adapter failed', mode: 'mock', reason: task.failure.message };
+        task.instrument.status = 'retired';
+        task.instrument.retiredAt = this.clock().toISOString();
         task.updatedAt = this.clock().toISOString();
-        appendAudit(data, task.id, this.clock, 'checkout.failed', 'error', 'Checkout failed before a definitive authorization; no retry was attempted.', {
+        appendAudit(data, task.id, this.clock, 'checkout.failed', 'error', 'Checkout did not produce a definitive result within the locked contract; no retry was attempted.', {
           code: task.failure.code,
           retry: 'not attempted'
         });
@@ -452,6 +541,7 @@ class NaviPayService {
         });
       } else if (result.status === 'unknown') {
         task.state = 'reconciliation_required';
+        task.instrument.status = 'pending_reconciliation';
         task.outcome = {
           status: 'unknown',
           label: 'Unknown - reconcile before any retry',
@@ -468,6 +558,8 @@ class NaviPayService {
         task.state = 'failed';
         task.failure = { stage: 'checkout', code: 'CHECKOUT_DECLINED', message: result.reason };
         task.outcome = { status: 'declined', label: 'Declined', mode: result.mode, checkoutReference: result.checkoutReference, reason: result.reason };
+        task.instrument.status = 'retired';
+        task.instrument.retiredAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'checkout.declined', 'error', 'Merchant declined the checkout; no retry was attempted.', {
           checkoutReference: result.checkoutReference,
           reason: result.reason
@@ -491,6 +583,7 @@ class NaviPayService {
           ...task.outcome,
           status: 'confirmed',
           label: 'Reconciled as authorized',
+          nextAction: 'none',
           reconciledAt: this.clock().toISOString()
         };
         task.instrument.status = 'retired';
@@ -503,7 +596,9 @@ class NaviPayService {
       } else {
         task.state = 'failed';
         task.failure = { stage: 'checkout', code: 'RECONCILED_DECLINED', message: 'Operator reconciled the unknown result as declined.' };
-        task.outcome = { ...task.outcome, status: 'declined', label: 'Reconciled as declined', reconciledAt: this.clock().toISOString() };
+        task.outcome = { ...task.outcome, status: 'declined', label: 'Reconciled as declined', nextAction: 'none', reconciledAt: this.clock().toISOString() };
+        task.instrument.status = 'retired';
+        task.instrument.retiredAt = this.clock().toISOString();
         appendAudit(data, task.id, this.clock, 'checkout.reconciled', 'error', 'Operator reconciled the unknown result as declined.', {
           checkoutReference: task.checkout.checkoutReference,
           retry: 'not attempted'
@@ -511,13 +606,14 @@ class NaviPayService {
       }
       task.updatedAt = this.clock().toISOString();
       return { statusCode: 200, body: taskResponse(task) };
-    });
+    }, resolution || '');
   }
 }
 
 module.exports = {
   CURRENCY,
   TASK_CEILING_MINOR,
+  SCENARIOS,
   DomainError,
   NaviPayService,
   money,
