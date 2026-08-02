@@ -1,4 +1,4 @@
-const state = { tasks: [], task: null, wallet: null, ledger: [], audit: [], busy: false, error: null };
+const state = { tasks: [], task: null, projection: null, wallet: null, ledger: [], audit: [], busy: false, error: null };
 const app = document.querySelector('#app');
 
 function escapeHtml(value) {
@@ -110,6 +110,7 @@ function emptyState() {
 }
 
 function productSummary(task) {
+  const view = state.projection || {};
   const item = task.quote?.lockedSnapshot || task.quote?.candidates?.find((candidate) => candidate.id === task.quote?.selectedCandidateId) || null;
   const fallbackItem = task.failure?.code === 'OUT_OF_STOCK' ? task.quote?.candidates?.find((candidate) => candidate.id === task.recommendation?.candidateId) || task.quote?.candidates?.[0] : null;
   const displayItem = item || fallbackItem;
@@ -123,23 +124,30 @@ function productSummary(task) {
   const amountNote = paymentWasMade ? 'Confirmed payment' : task.payment ? 'Nothing charged' : 'Expected total';
   const stockNote = displayItem?.variant || (recommendation?.reason || 'NaviPay is looking for a suitable item.');
   const itemLabel = item ? 'Item found' : fallbackItem ? 'Requested item' : 'Item';
-  return `<section class="panel product-panel"><div class="panel-heading"><div><span class="overline">${escapeHtml(itemLabel)}</span><h2>${escapeHtml(itemName)}</h2></div>${modeBadge('LOCAL SIMULATION')}</div><div class="product-highlight"><div><span class="product-label">Merchant</span><strong>${escapeHtml(merchant)}</strong><small>${escapeHtml(stockNote)}</small></div><div class="product-amount"><span class="product-label">Amount spent</span><strong>${escapeHtml(amountSpent)}</strong><small>${escapeHtml(amountNote)}</small></div></div></section>`;
+  const breakdown = view.quote && Number.isFinite(view.quote.totalMinor) ? `<div class="quote-breakdown" aria-label="Quote breakdown">${dataCell('Subtotal', formatMoney(view.quote.subtotalMinor, view.quote.currency))}${dataCell('Shipping', formatMoney(view.quote.shippingMinor, view.quote.currency))}${dataCell('Tax', formatMoney(view.quote.taxMinor, view.quote.currency))}${dataCell('Total', formatMoney(view.quote.totalMinor, view.quote.currency))}</div>` : '';
+  const rationale = view.recommendation?.reason || recommendation?.reason || 'NaviPay is looking for a suitable item.';
+  const receiptNote = view.receipt?.status === 'confirmed' ? `Receipt ${shortId(view.receipt.id)} is ready.` : '';
+  return `<section class="panel product-panel"><div class="panel-heading"><div><span class="overline">${escapeHtml(itemLabel)}</span><h2>${escapeHtml(itemName)}</h2></div>${modeBadge('LOCAL SIMULATION')}</div><div class="product-highlight"><div><span class="product-label">Merchant</span><strong>${escapeHtml(merchant)}</strong><small>${escapeHtml(stockNote)}</small><small class="selection-reason">Why this item: ${escapeHtml(rationale)}</small></div><div class="product-amount"><span class="product-label">Amount spent</span><strong>${escapeHtml(amountSpent)}</strong><small>${escapeHtml(amountNote)}</small></div></div>${breakdown}${receiptNote ? `<p class="receipt-note">✓ ${escapeHtml(receiptNote)}</p>` : ''}</section>`;
 }
 
 function balanceSummary(task) {
   const wallet = state.wallet || {};
-  const starting = task.wallet?.balanceMinor ?? wallet.initialBalanceMinor;
-  const remaining = task.wallet?.balanceAfterMinor ?? wallet.balanceMinor ?? starting;
-  const startingNote = task.wallet ? 'Balance before this purchase' : 'Seeded fake balance';
-  const remainingNote = task.payment?.status === 'authorized' ? 'After this purchase' : task.payment?.status === 'compensated' ? 'Payment was reversed' : 'No payment taken';
-  return `<section class="panel balance-panel"><div class="panel-heading"><div><span class="overline">Fake wallet</span><h2>Your balance</h2></div><span class="fixture-chip">NO REAL FUNDS</span></div><div class="balance-grid">${dataCell('Starting balance', formatMoney(starting, task.currency || wallet.currency), startingNote)}${dataCell('Remaining balance', formatMoney(remaining, task.currency || wallet.currency), remainingNote)}</div></section>`;
+  const financial = state.projection?.financial || task.financial || {};
+  const starting = financial.balanceBeforeMinor ?? task.wallet?.balanceMinor ?? wallet.initialBalanceMinor;
+  const afterPayment = financial.balanceAfterPaymentMinor;
+  const finalBalance = financial.finalBalanceMinor ?? task.wallet?.balanceAfterMinor ?? wallet.balanceMinor ?? starting;
+  const currency = task.currency || wallet.currency;
+  return `<section class="panel balance-panel"><div class="panel-heading"><div><span class="overline">Fake wallet</span><h2>Your balance</h2></div><span class="fixture-chip">NO REAL FUNDS</span></div><div class="balance-grid">${dataCell('Wallet before', formatMoney(starting, currency), 'Before this purchase')}${dataCell('After payment', afterPayment == null ? 'Not charged' : formatMoney(afterPayment, currency), afterPayment == null ? 'No confirmed debit' : 'After the debit')}${dataCell('Final balance', formatMoney(finalBalance, currency), financial.outcome === 'compensated' ? 'After compensation' : 'Current spendable balance')}</div></section>`;
 }
 
 function commerceStatus(task) {
   const purchase = task.state === 'failed' ? 'failed' : task.state === 'reconciliation_required' ? 'reconciliation_required' : task.state === 'awaiting_selection' ? 'awaiting_selection' : task.purchaseStatus || task.state;
+  const payment = task.payment?.status || 'pending';
+  const inventory = task.inventory?.status || 'not_started';
   const order = task.order?.status || (task.state === 'failed' ? 'not_started' : 'pending');
+  const fulfillment = task.fulfillment?.status || 'not_started';
   const delivery = task.delivery?.status || (task.order ? 'pending' : 'not_started');
-  return `<section class="panel commerce-panel"><div class="panel-heading"><div><span class="overline">At a glance</span><h2>Where things stand</h2></div>${statusPill(purchase)}</div><div class="commerce-grid">${dataCell('Purchase status', statusLabels[purchase] || 'In progress')}${dataCell('Order status', statusLabels[order] || order)}${dataCell('Delivery status', statusLabels[delivery] || delivery)}</div></section>`;
+  return `<section class="panel commerce-panel"><div class="panel-heading"><div><span class="overline">At a glance</span><h2>Where things stand</h2></div>${statusPill(purchase)}</div><div class="commerce-grid">${dataCell('Inventory', statusLabels[inventory] || inventory)}${dataCell('Payment', statusLabels[payment] || payment)}${dataCell('Order', statusLabels[order] || order)}${dataCell('Fulfillment', statusLabels[fulfillment] || fulfillment)}${dataCell('Delivery', statusLabels[delivery] || delivery)}</div></section>`;
 }
 
 const progressBands = [
@@ -239,9 +247,11 @@ async function refresh() {
   const payload = await api('/api/tasks');
   state.tasks = payload.tasks || [];
   state.wallet = payload.wallet || null;
+  const projections = payload.projections || [];
   if (state.task) {
     const current = state.tasks.find((task) => task.id === state.task.id);
     if (current) state.task = current;
+    state.projection = projections.find((view) => view.taskId === state.task.id) || state.projection;
   }
   if (state.task) {
     await loadAudit(state.task.id);
@@ -271,6 +281,7 @@ async function runPurchase(event) {
   try {
     const payload = await api('/api/purchases/run', { method: 'POST', headers: { 'Idempotency-Key': runKey() }, body: JSON.stringify({ request }) });
     state.task = payload.task;
+    state.projection = payload.projection || state.projection;
     await refresh();
     form.reset();
   } catch (error) {
@@ -294,6 +305,7 @@ async function resumeTask(candidateId) {
   try {
     const payload = await api(`/api/tasks/${encodeURIComponent(state.task.id)}/run`, { method: 'POST', headers: { 'Idempotency-Key': runKey() }, body: JSON.stringify({ candidateId }) });
     state.task = payload.task;
+    state.projection = payload.projection || state.projection;
     await refresh();
   } catch (error) {
     state.error = { code: error.code, message: error.message };
@@ -312,6 +324,7 @@ async function reconcilePayment(resolution) {
   try {
     const payload = await api(`/api/tasks/${encodeURIComponent(state.task.id)}/payment/reconcile`, { method: 'POST', headers: { 'Idempotency-Key': runKey() }, body: JSON.stringify({ resolution }) });
     state.task = payload.task;
+    state.projection = payload.projection || state.projection;
     await refresh();
   } catch (error) {
     state.error = { code: error.code, message: error.message };
@@ -327,7 +340,9 @@ async function selectTask(taskId) {
   state.busy = true;
   state.error = null;
   try {
-    state.task = (await api(`/api/tasks/${encodeURIComponent(taskId)}`)).task;
+    const payload = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
+    state.task = payload.task;
+    state.projection = payload.projection || state.projection;
     await loadAudit(taskId);
     await refresh();
   } catch (error) {
@@ -352,6 +367,7 @@ async function boot() {
     state.tasks = payload.tasks || [];
     state.wallet = payload.wallet || null;
     state.task = state.tasks[0] || null;
+    state.projection = (payload.projections || []).find((view) => view.taskId === state.task?.id) || null;
     if (state.task) {
       await loadAudit(state.task.id);
       const walletDetails = await api('/api/wallet');

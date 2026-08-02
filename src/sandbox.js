@@ -431,13 +431,14 @@ class LocalWalletTransferAdapter {
     const merchantBalance = data.merchantBalances[merchantId] || 0;
     const transactionReference = stableReference('LEDGER-TX', `${opId}:${kind}`);
     const timestamp = now(this.clock);
+    const balanceBeforeMinor = wallet.balanceMinor;
     wallet.balanceMinor -= amountMinor;
     data.merchantBalances[merchantId] = merchantBalance + amountMinor;
     data.walletLedger.push(
       { id: `${transactionReference}:debit`, transactionReference, operationId: opId, taskId, kind, entry: 'debit', accountId: walletId, amountMinor, currency, occurredAt: timestamp },
       { id: `${transactionReference}:credit`, transactionReference, operationId: opId, taskId, kind, entry: 'credit', accountId: merchantAccount, amountMinor, currency, occurredAt: timestamp }
     );
-    return { status: 'authorized', reference, transactionReference, walletBalanceMinor: wallet.balanceMinor, merchantBalanceMinor: data.merchantBalances[merchantId], occurredAt: timestamp };
+    return { status: 'authorized', reference, transactionReference, walletBalanceMinor: wallet.balanceMinor, balanceBeforeMinor, balanceAfterPaymentMinor: wallet.balanceMinor, merchantBalanceMinor: data.merchantBalances[merchantId], occurredAt: timestamp };
   }
 
   transfer({ operationId: opId, taskId, walletId, merchantId, amountMinor, currency, scenario = 'happy' }) {
@@ -446,13 +447,14 @@ class LocalWalletTransferAdapter {
       const existing = data.walletTransfers[opId];
       if (existing) return clone(existing);
       const reference = stableReference('WALLET-OP', opId);
+      const balanceBeforeMinor = data.wallets[walletId]?.balanceMinor ?? null;
       if (scenario === 'payment-decline' || scenario === 'insufficient-funds') {
-        const declined = { operationId: opId, taskId, status: 'declined', code: scenario === 'insufficient-funds' ? 'INSUFFICIENT_FUNDS' : 'PAYMENT_DECLINED', reference, amountMinor, currency, occurredAt: now(this.clock) };
+        const declined = { operationId: opId, taskId, status: 'declined', code: scenario === 'insufficient-funds' ? 'INSUFFICIENT_FUNDS' : 'PAYMENT_DECLINED', reference, amountMinor, currency, balanceBeforeMinor, balanceAfterPaymentMinor: null, occurredAt: now(this.clock) };
         data.walletTransfers[opId] = declined;
         return clone(declined);
       }
       if (scenario === 'unknown-payment') {
-        const unknown = { operationId: opId, taskId, status: 'unknown', code: 'PAYMENT_UNKNOWN', reference, amountMinor, currency, occurredAt: now(this.clock), message: 'The simulated wallet did not return a definitive transfer result.' };
+        const unknown = { operationId: opId, taskId, status: 'unknown', code: 'PAYMENT_UNKNOWN', reference, amountMinor, currency, balanceBeforeMinor, balanceAfterPaymentMinor: null, occurredAt: now(this.clock), message: 'The simulated wallet did not return a definitive transfer result.' };
         data.walletTransfers[opId] = unknown;
         return clone(unknown);
       }
@@ -471,6 +473,8 @@ class LocalWalletTransferAdapter {
       if (resolution === 'declined') {
         existing.status = 'declined';
         existing.code = 'PAYMENT_DECLINED_RECONCILED';
+        existing.balanceAfterPaymentMinor = null;
+        existing.finalBalanceMinor = data.wallets[walletId]?.balanceMinor ?? null;
         existing.resolvedAt = now(this.clock);
         return clone(existing);
       }
@@ -504,7 +508,7 @@ class LocalWalletTransferAdapter {
         { id: `${transactionReference}:debit`, transactionReference, operationId: opId, taskId, kind: 'compensation', entry: 'debit', accountId: `merchant:${merchantId}`, amountMinor, currency, occurredAt: timestamp },
         { id: `${transactionReference}:credit`, transactionReference, operationId: opId, taskId, kind: 'compensation', entry: 'credit', accountId: walletId, amountMinor, currency, occurredAt: timestamp }
       );
-      const compensated = { operationId: opId, taskId, status: 'compensated', code: 'PAYMENT_COMPENSATED', reference, transactionReference, amountMinor, currency, occurredAt: timestamp, walletBalanceMinor: wallet.balanceMinor };
+      const compensated = { operationId: opId, taskId, status: 'compensated', code: 'PAYMENT_COMPENSATED', reference, transactionReference, amountMinor, currency, balanceBeforeMinor: wallet.balanceMinor - amountMinor, balanceAfterPaymentMinor: wallet.balanceMinor - amountMinor, finalBalanceMinor: wallet.balanceMinor, walletBalanceMinor: wallet.balanceMinor, occurredAt: timestamp };
       data.walletTransfers[opId] = compensated;
       return clone(compensated);
     });
@@ -723,6 +727,220 @@ function publicWallet(wallet) {
   };
 }
 
+const TASK_PROJECTION_VERSION = 1;
+
+function safeCandidate(candidate) {
+  if (!candidate) return null;
+  return {
+    id: candidate.id,
+    merchant: candidate.merchant,
+    merchantId: candidate.merchantId,
+    item: candidate.item,
+    variant: candidate.variant,
+    brand: candidate.brand,
+    productCategory: candidate.productCategory,
+    subtotalMinor: candidate.subtotalMinor,
+    shippingMinor: candidate.shippingMinor,
+    taxMinor: candidate.taxMinor,
+    totalMinor: candidate.totalMinor,
+    currency: candidate.currency,
+    availability: candidate.availability,
+    stockQuantity: candidate.stockQuantity,
+    relevanceScore: candidate.relevanceScore,
+    matchReasons: Array.isArray(candidate.matchReasons) ? [...candidate.matchReasons] : [],
+    quoteExpiresAt: candidate.quoteExpiresAt,
+    evidence: candidate.evidence ? {
+      type: candidate.evidence.type,
+      source: candidate.evidence.source,
+      observedAt: candidate.evidence.observedAt,
+      note: candidate.evidence.note
+    } : null
+  };
+}
+
+function safeReference(value) {
+  return value || null;
+}
+
+function projectOperation(operation) {
+  if (!operation) return null;
+  return {
+    id: operation.id,
+    taskId: operation.taskId,
+    stage: operation.stage,
+    status: operation.status,
+    code: operation.code || null,
+    reference: safeReference(operation.reference),
+    attempts: operation.attempts || 0,
+    startedAt: operation.startedAt || null,
+    completedAt: operation.completedAt || null,
+    updatedAt: operation.updatedAt || null
+  };
+}
+
+function projectAuditEvent(event) {
+  return {
+    id: event.id,
+    taskId: event.taskId,
+    occurredAt: event.occurredAt,
+    type: event.type,
+    status: event.status,
+    summary: event.summary,
+    operationId: safeReference(event.operationId),
+    reference: safeReference(event.reference)
+  };
+}
+
+function projectFinancial(task, walletBalanceMinor = null) {
+  const financial = task.financial || {};
+  const payment = task.payment || {};
+  const compensation = task.compensation || financial.compensation || null;
+  const finalBalanceMinor = financial.finalBalanceMinor ?? walletBalanceMinor;
+  return {
+    version: 1,
+    currency: task.currency,
+    amountMinor: financial.amountMinor ?? task.quote?.totalMinor ?? null,
+    balanceBeforeMinor: financial.balanceBeforeMinor ?? payment.balanceBeforeMinor ?? null,
+    balanceAfterPaymentMinor: financial.balanceAfterPaymentMinor ?? payment.balanceAfterPaymentMinor ?? null,
+    finalBalanceMinor,
+    netChargedMinor: financial.netChargedMinor ?? (financial.balanceBeforeMinor != null && finalBalanceMinor != null ? financial.balanceBeforeMinor - finalBalanceMinor : null),
+    compensation: compensation ? {
+      status: compensation.status,
+      amountMinor: compensation.amountMinor || 0,
+      reference: safeReference(compensation.reference),
+      transactionReference: safeReference(compensation.transactionReference),
+      occurredAt: compensation.occurredAt || null
+    } : { status: 'not_required', amountMinor: 0, reference: null, transactionReference: null, occurredAt: null },
+    outcome: financial.outcome || (payment.status === 'authorized' ? 'authorized' : payment.status || 'pending')
+  };
+}
+
+function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMinor = null } = {}) {
+  const candidates = (task.quote?.candidates || []).map(safeCandidate);
+  const selected = safeCandidate(task.quote?.lockedSnapshot) || candidates.find((candidate) => candidate.id === task.quote?.selectedCandidateId) || null;
+  const reservation = task.inventory?.reservation;
+  const quote = task.quote ? {
+    status: task.quote.locked ? 'locked' : 'open',
+    merchantId: task.quote.merchantId || selected?.merchantId || null,
+    merchant: task.quote.merchant || selected?.merchant || null,
+    item: task.quote.item || selected?.item || null,
+    variant: task.quote.variant || selected?.variant || null,
+    subtotalMinor: selected?.subtotalMinor ?? null,
+    shippingMinor: selected?.shippingMinor ?? null,
+    taxMinor: selected?.taxMinor ?? null,
+    totalMinor: task.quote.totalMinor ?? selected?.totalMinor ?? null,
+    currency: task.quote.currency || selected?.currency || task.currency,
+    expiresAt: selected?.quoteExpiresAt || null,
+    selectedCandidateId: task.quote.selectedCandidateId || null,
+    candidates,
+    recommendation: task.recommendation ? {
+      status: task.recommendation.status,
+      candidateId: task.recommendation.candidateId,
+      reason: task.recommendation.reason,
+      autoSelectable: Boolean(task.recommendation.autoSelectable),
+      evidence: selected?.matchReasons || []
+    } : null
+  } : null;
+  const safePayment = task.payment ? {
+    status: task.payment.status,
+    code: task.payment.code || null,
+    amountMinor: task.payment.amountMinor || quote?.totalMinor || null,
+    currency: task.payment.currency || task.currency,
+    reference: safeReference(task.payment.reference),
+    transactionReference: safeReference(task.payment.transactionReference),
+    occurredAt: task.payment.occurredAt || null,
+    resolvedAt: task.payment.resolvedAt || null,
+    balanceBeforeMinor: task.payment.balanceBeforeMinor ?? null,
+    balanceAfterPaymentMinor: task.payment.balanceAfterPaymentMinor ?? null
+  } : { status: 'pending', code: null, amountMinor: quote?.totalMinor || null, currency: task.currency, reference: null, transactionReference: null, occurredAt: null, resolvedAt: null, balanceBeforeMinor: null, balanceAfterPaymentMinor: null };
+  return {
+    version: TASK_PROJECTION_VERSION,
+    taskId: task.id,
+    mode: task.mode,
+    disclosure: 'SIMULATED ONLY - fake wallet, seeded catalog, local order, and fixture delivery. No real funds moved.',
+    state: task.state,
+    purchaseStatus: task.purchaseStatus,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    nextAction: task.automation?.nextAction || 'none',
+    request: {
+      raw: task.request?.raw || '',
+      interpreted: task.request?.intent ? {
+        normalized: task.request.intent.normalized,
+        brand: task.request.intent.brand,
+        productCategory: task.request.intent.productCategory,
+        keywords: task.request.intent.keywords
+      } : null
+    },
+    recommendation: quote?.recommendation || null,
+    quote,
+    inventory: task.inventory ? {
+      status: task.inventory.status,
+      reservation: reservation ? {
+        status: reservation.status,
+        quantity: reservation.quantity,
+        leaseExpiresAt: reservation.leaseExpiresAt || null,
+        reference: safeReference(reservation.reference),
+        releasedAt: reservation.releasedAt || null,
+        committedAt: reservation.committedAt || null
+      } : null
+    } : { status: 'not_started', reservation: null },
+    wallet: task.wallet ? {
+      currency: task.wallet.currency,
+      balanceBeforeMinor: task.financial?.balanceBeforeMinor ?? task.wallet.balanceMinor,
+      balanceAfterPaymentMinor: task.financial?.balanceAfterPaymentMinor ?? null,
+      finalBalanceMinor: task.financial?.finalBalanceMinor ?? walletBalanceMinor ?? task.wallet.balanceAfterMinor ?? null
+    } : null,
+    financial: projectFinancial(task, walletBalanceMinor),
+    payment: safePayment,
+    merchantCredit: task.merchantCredit ? {
+      status: task.merchantCredit.status,
+      code: task.merchantCredit.code || null,
+      amountMinor: task.merchantCredit.amountMinor || null,
+      currency: task.merchantCredit.currency || task.currency,
+      reference: safeReference(task.merchantCredit.reference),
+      transferReference: safeReference(task.merchantCredit.transferReference),
+      occurredAt: task.merchantCredit.occurredAt || null
+    } : { status: 'pending', reference: null },
+    order: task.order ? {
+      status: task.order.status,
+      reference: safeReference(task.order.reference),
+      merchant: task.order.merchant,
+      item: task.order.item,
+      variant: task.order.variant,
+      fulfillmentStatus: task.order.fulfillmentStatus,
+      deliveryStatus: task.order.deliveryStatus,
+      createdAt: task.order.createdAt || null
+    } : { status: 'not_started', reference: null },
+    fulfillment: { status: task.fulfillment?.status || 'pending', reference: safeReference(task.fulfillment?.reference), code: task.fulfillment?.code || null, shippedAt: task.fulfillment?.shippedAt || null },
+    delivery: { status: task.delivery?.status || 'pending', reference: safeReference(task.delivery?.reference), trackingReference: safeReference(task.delivery?.trackingReference), attemptedAt: task.delivery?.attemptedAt || null, deliveredAt: task.delivery?.deliveredAt || null, code: task.delivery?.code || null },
+    funding: task.funding ? {
+      status: 'verified',
+      asset: task.currency,
+      chain: task.funding.network || null,
+      evidenceReference: safeReference(task.funding.transactionReference),
+      observedAt: task.funding.observedAt || null
+    } : { status: 'not_started' },
+    customer: task.customer ? { name: task.customer.name, addressLabel: task.customer.address?.label || null, disclosure: task.customer.disclosure } : null,
+    receipt: task.receipt ? {
+      status: task.receipt.status,
+      id: safeReference(task.receipt.id),
+      item: task.receipt.item,
+      amountMinor: task.receipt.amountMinor,
+      currency: task.receipt.currency,
+      orderReference: safeReference(task.receipt.orderReference),
+      fulfillmentStatus: task.receipt.fulfillmentStatus,
+      deliveryStatus: task.receipt.deliveryStatus,
+      issuedAt: task.receipt.issuedAt,
+      disclosure: task.receipt.disclosure
+    } : null,
+    progress: (task.progress || []).map((item) => ({ stage: item.stage, status: item.status, reference: safeReference(item.reference), detail: item.detail, startedAt: item.startedAt, completedAt: item.completedAt })),
+    failure: task.failure ? { stage: task.failure.stage, code: task.failure.code, message: task.failure.message } : null,
+    operations: Object.values(operations).filter((operation) => operation.taskId === task.id).map(projectOperation),
+    timeline: auditEvents.filter((event) => event.taskId === task.id).map(projectAuditEvent)
+  };
+}
+
 class NaviPaySandboxService {
   constructor({ store, clock = () => new Date(), adapters = {} } = {}) {
     if (!store) throw new Error('A store is required for the local sandbox.');
@@ -835,7 +1053,8 @@ class NaviPaySandboxService {
   _response(taskId, statusCode = 200, replayed = false) {
     const task = this.getTask(taskId);
     const runStatus = task.automation.status;
-    return { statusCode, body: { task, run: { status: runStatus, nextAction: task.automation.nextAction, automatic: task.automation.automatic }, replayed } };
+    const projection = this.getTaskProjection(taskId);
+    return { statusCode, body: { task, projection, run: { status: runStatus, nextAction: task.automation.nextAction, automatic: task.automation.automatic }, replayed } };
   }
 
   createTask({ request, scenario = 'happy', origin = 'operator', replayOf = null } = {}) {
@@ -869,6 +1088,16 @@ class NaviPaySandboxService {
       inventory: null,
       funding: null,
       wallet: null,
+      financial: {
+        version: 1,
+        amountMinor: null,
+        balanceBeforeMinor: null,
+        balanceAfterPaymentMinor: null,
+        finalBalanceMinor: null,
+        netChargedMinor: null,
+        compensation: { status: 'not_required', amountMinor: 0, reference: null, transactionReference: null, occurredAt: null },
+        outcome: 'pending'
+      },
       payment: null,
       merchantCredit: null,
       order: null,
@@ -899,13 +1128,30 @@ class NaviPaySandboxService {
 
   getAudit(taskId) {
     if (!this.store.data.tasks[taskId]) throw new SandboxDomainError(404, 'TASK_NOT_FOUND', 'That purchase does not exist.');
-    return clone(this.store.data.auditEvents.filter((event) => event.taskId === taskId));
+    return this.store.data.auditEvents.filter((event) => event.taskId === taskId).map(projectAuditEvent);
+  }
+
+  getTaskProjection(taskId) {
+    const task = this.store.data.tasks[taskId];
+    if (!task) throw new SandboxDomainError(404, 'TASK_NOT_FOUND', 'That purchase does not exist.');
+    return projectTask(task, {
+      operations: this.store.data.operations,
+      auditEvents: this.store.data.auditEvents,
+      walletBalanceMinor: this.store.data.wallets[task.walletId]?.balanceMinor ?? null
+    });
   }
 
   getReceipt(taskId) {
     const task = this.getTask(taskId);
     if (!task.receipt) throw new SandboxDomainError(404, 'RECEIPT_NOT_READY', 'The purchase has no confirmed receipt yet.');
-    return task.receipt;
+    return {
+      ...task.receipt,
+      customer: task.receipt.customer ? {
+        name: task.receipt.customer.name,
+        addressLabel: task.receipt.customer.address?.label || null,
+        disclosure: task.receipt.customer.disclosure
+      } : null
+    };
   }
 
   getWallet() {
@@ -925,6 +1171,35 @@ class NaviPaySandboxService {
     });
   }
 
+  _updateFinancial(taskId, { payment = null, compensation = null, outcome = null } = {}) {
+    this.store.transaction((data) => {
+      const task = data.tasks[taskId];
+      if (!task) return;
+      const walletBalanceMinor = data.wallets[task.walletId]?.balanceMinor ?? null;
+      const current = task.financial || { version: 1, amountMinor: task.quote?.totalMinor ?? null, balanceBeforeMinor: null, balanceAfterPaymentMinor: null, finalBalanceMinor: null, netChargedMinor: null, compensation: null, outcome: 'pending' };
+      const nextPayment = payment || task.payment;
+      const balanceBeforeMinor = current.balanceBeforeMinor ?? nextPayment?.balanceBeforeMinor ?? (nextPayment ? walletBalanceMinor : null);
+      const afterPayment = current.balanceAfterPaymentMinor ?? nextPayment?.balanceAfterPaymentMinor ?? (nextPayment?.status === 'authorized' ? nextPayment.walletBalanceMinor : null);
+      const nextCompensation = compensation || current.compensation;
+      const finalBalanceMinor = walletBalanceMinor;
+      const netChargedMinor = balanceBeforeMinor != null && finalBalanceMinor != null ? balanceBeforeMinor - finalBalanceMinor : null;
+      const financialOutcome = outcome || current.outcome || 'pending';
+      task.financial = {
+        ...current,
+        version: 1,
+        amountMinor: current.amountMinor ?? task.quote?.totalMinor ?? nextPayment?.amountMinor ?? null,
+        balanceBeforeMinor,
+        balanceAfterPaymentMinor: afterPayment,
+        finalBalanceMinor,
+        netChargedMinor,
+        compensation: nextCompensation,
+        outcome: financialOutcome
+      };
+      if (task.payment) task.payment = { ...task.payment, finalBalanceMinor, netChargedMinor, financialOutcome };
+      if (task.wallet) task.wallet = { ...task.wallet, balanceBeforeMinor, balanceAfterPaymentMinor: afterPayment, finalBalanceMinor, netChargedMinor };
+    });
+  }
+
   _releaseReservation(taskId, reason) {
     const task = this.getTask(taskId);
     if (!task.inventory?.reservation || !['reserved'].includes(task.inventory.reservation.status)) return;
@@ -938,7 +1213,8 @@ class NaviPaySandboxService {
     const task = this.getTask(taskId);
     if (!task.payment || task.payment.status !== 'authorized') return null;
     const compensated = this.walletAdapter.compensate({ operationId: operationId(taskId, 'payment'), taskId, walletId: task.walletId, merchantId: task.quote.merchantId, amountMinor: task.quote.totalMinor, currency: task.currency });
-    this._updateTask(taskId, (current) => { current.compensation = compensated; current.payment = { ...current.payment, status: compensated.status === 'compensated' ? 'compensated' : current.payment.status }; });
+    this._updateTask(taskId, (current) => { current.compensation = compensated; current.payment = { ...current.payment, status: compensated.status === 'compensated' ? 'compensated' : current.payment.status, finalBalanceMinor: compensated.finalBalanceMinor ?? null }; });
+    this._updateFinancial(taskId, { compensation: compensated, outcome: compensated.status === 'compensated' ? 'compensated' : 'compensation_failed' });
     this._recordStageAudit(taskId, 'payment', 'payment.compensated', compensated.status === 'compensated' ? 'warning' : 'error', compensated.status === 'compensated' ? `Payment compensated after ${reason}.` : 'Payment compensation failed and requires operator review.', compensated);
     return compensated;
   }
@@ -958,6 +1234,7 @@ class NaviPaySandboxService {
     this._complete(taskId, 'delivery', delivery, delivery.reference);
     this._recordStageAudit(taskId, 'delivery', `delivery.${delivery.status}`, delivery.status === 'delivered' ? 'success' : 'warning', delivery.status === 'delivered' ? 'Simulated delivery completed to the fixture address.' : 'Delivery failed independently; confirmed payment and order were preserved.', delivery);
 
+    this._updateFinancial(taskId, { outcome: 'confirmed' });
     task = this.getTask(taskId);
     const receiptOp = this._begin(taskId, 'receipt');
     const auditOp = this._begin(taskId, 'audit');
@@ -1128,6 +1405,7 @@ class NaviPaySandboxService {
         current.payment = payment;
         current.wallet = { ...current.wallet, balanceAfterMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null };
       });
+      this._updateFinancial(taskId, { payment, outcome: payment.status === 'unknown' ? 'unknown' : payment.status === 'authorized' ? 'authorized' : 'declined' });
       if (payment.status === 'unknown') {
         this._setProgress(taskId, 'payment', 'unknown', { detail: 'reconciliation_required', reference: payment.reference });
         this._recordStageAudit(taskId, 'payment', 'payment.unknown', 'warning', 'Wallet transfer returned an unknown result. Inventory remains held and blind retry is blocked.', payment);
@@ -1136,6 +1414,7 @@ class NaviPaySandboxService {
       }
       if (payment.status !== 'authorized') {
         this._releaseReservation(taskId, payment.code === 'INSUFFICIENT_FUNDS' ? 'insufficient funds' : 'payment declined');
+        this._updateFinancial(taskId, { outcome: 'declined' });
         this._fail(taskId, 'payment', payment.code || 'PAYMENT_DECLINED', payment.code === 'INSUFFICIENT_FUNDS' ? 'The fake wallet has insufficient XSGD balance; no debit was made.' : 'The simulated wallet declined payment; no debit was made.', { reference: payment.reference });
         return this._response(taskId, 402);
       }
@@ -1236,16 +1515,19 @@ class NaviPaySandboxService {
     if (task.state !== 'reconciliation_required' || task.payment?.status !== 'unknown') throw new SandboxDomainError(409, 'PAYMENT_RECONCILIATION_NOT_REQUIRED', 'This purchase has no unknown payment awaiting reconciliation.');
     if (!['authorized', 'declined'].includes(resolution)) throw new SandboxDomainError(422, 'INVALID_PAYMENT_RESOLUTION', 'Resolution must be authorized or declined.');
     const payment = this.walletAdapter.resolveUnknown({ operationId: operationId(taskId, 'payment'), taskId, walletId: task.walletId, merchantId: task.quote.merchantId, amountMinor: task.quote.totalMinor, currency: task.currency, resolution });
-    this._updateTask(taskId, (current) => { current.payment = payment; });
+    this._updateTask(taskId, (current) => { current.payment = payment; current.wallet = { ...current.wallet, balanceAfterMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null }; });
+    this._updateFinancial(taskId, { payment, outcome: resolution === 'authorized' ? 'authorized' : 'declined' });
     this._recordStageAudit(taskId, 'payment', `payment.reconciled.${resolution}`, resolution === 'authorized' ? 'success' : 'warning', resolution === 'authorized' ? 'Unknown payment reconciled as authorized without retrying the transfer.' : 'Unknown payment reconciled as declined; inventory will be released.', payment);
     if (resolution === 'declined') {
       this._releaseReservation(taskId, 'payment reconciled declined');
+      this._updateFinancial(taskId, { outcome: 'declined' });
       this._fail(taskId, 'payment', 'PAYMENT_DECLINED_RECONCILED', 'The unknown wallet transfer was reconciled as declined; no duplicate payment was attempted.', { reference: payment.reference });
       const response = this._response(taskId, 200);
       this.store.transaction((data) => { data.idempotency[key] = { taskId, requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
       return response;
     }
     this._complete(taskId, 'payment', payment, payment.reference);
+    this._updateFinancial(taskId, { outcome: 'authorized' });
     this._updateTask(taskId, (current) => { current.state = 'payment_confirmed'; current.automation = { ...current.automation, status: 'running', nextAction: 'Continuing after reconciled payment.' }; });
     const result = this.runTask(taskId);
     this.store.transaction((data) => { data.idempotency[key] = { taskId, requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(result) }; });
@@ -1253,7 +1535,7 @@ class NaviPaySandboxService {
   }
 
   lookupOperation(id) {
-    return clone(this.store.data.operations[id] || null);
+    return projectOperation(this.store.data.operations[id] || null);
   }
 
   getWalletLedger() {
@@ -1261,7 +1543,23 @@ class NaviPaySandboxService {
   }
 
   lookupWalletTransfer(operationIdValue) {
-    return this.walletAdapter.lookup(operationIdValue);
+    const transfer = this.walletAdapter.lookup(operationIdValue);
+    if (!transfer) return null;
+    return {
+      operationId: transfer.operationId,
+      taskId: transfer.taskId,
+      status: transfer.status,
+      code: transfer.code || null,
+      amountMinor: transfer.amountMinor,
+      currency: transfer.currency,
+      reference: safeReference(transfer.reference),
+      transactionReference: safeReference(transfer.transactionReference),
+      balanceBeforeMinor: transfer.balanceBeforeMinor ?? null,
+      balanceAfterPaymentMinor: transfer.balanceAfterPaymentMinor ?? null,
+      finalBalanceMinor: transfer.finalBalanceMinor ?? null,
+      occurredAt: transfer.occurredAt || null,
+      resolvedAt: transfer.resolvedAt || null
+    };
   }
 
   getInventory() {
@@ -1294,6 +1592,10 @@ module.exports = {
   LocalOrderAdapter,
   LocalFulfillmentAdapter,
   LocalDeliveryAdapter,
+  TASK_PROJECTION_VERSION,
+  projectAuditEvent,
+  projectOperation,
+  projectTask,
   parseRequest,
   money,
   seedSandbox

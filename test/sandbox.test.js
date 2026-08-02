@@ -93,19 +93,71 @@ test('unknown payment holds stock and reconciles once without a blind retry', ()
   assert.equal(service.getWalletLedger().length, 2);
 });
 
-test('order failure compensates payment and releases stock', () => {
-  const service = makeService();
-  const result = run(service, 'I want a keyboard', 'order-failure');
-  const task = result.body.task;
-  assert.equal(result.statusCode, 502);
-  assert.equal(task.failure.code, 'ORDER_CREATION_FAILED');
-  assert.equal(task.payment.status, 'compensated');
-  assert.equal(task.compensation.status, 'compensated');
-  assert.equal(task.inventory.reservation.status, 'released');
-  assert.equal(task.order.status, 'failed');
-  assert.equal(service.getWallet().balanceMinor, 50000);
-  assert.equal(service.getWalletLedger().length, 4);
-  assert.ok(service.getAudit(task.id).some((event) => event.type === 'payment.compensated'));
+test('order and merchant-credit failures persist truthful compensation snapshots', () => {
+  for (const scenario of ['order-failure', 'merchant-credit-failure']) {
+    const service = makeService();
+    const result = run(service, 'I want a keyboard', scenario);
+    const task = result.body.task;
+    assert.equal(result.statusCode, 502);
+    assert.equal(task.failure.code, scenario === 'order-failure' ? 'ORDER_CREATION_FAILED' : 'MERCHANT_CREDIT_FAILED');
+    if (scenario === 'order-failure') assert.equal(task.order.status, 'failed');
+    assert.equal(task.payment.status, 'compensated');
+    assert.equal(task.compensation.status, 'compensated');
+    assert.equal(task.financial.balanceBeforeMinor, 50000);
+    assert.equal(task.financial.balanceAfterPaymentMinor, 50000 - task.quote.totalMinor);
+    assert.equal(task.financial.finalBalanceMinor, 50000);
+    assert.equal(task.financial.netChargedMinor, 0);
+    assert.equal(task.financial.outcome, 'compensated');
+    assert.equal(task.wallet.finalBalanceMinor, 50000);
+    assert.equal(task.inventory.reservation.status, 'released');
+    assert.equal(service.getWallet().balanceMinor, 50000);
+    assert.equal(service.getWalletLedger().length, 4);
+  }
+});
+
+test('unknown authorized and declined reconciliation persist final financial outcomes', () => {
+  const authorizedService = makeService();
+  const authorized = run(authorizedService, 'I want earphones', 'unknown-payment');
+  const authorizedTask = authorized.body.task;
+  const authorizedResult = authorizedService.reconcilePayment(authorizedTask.id, 'reconcile-authorized', 'authorized');
+  const completed = authorizedResult.body.task;
+  assert.equal(completed.financial.balanceBeforeMinor, 50000);
+  assert.equal(completed.financial.balanceAfterPaymentMinor, 50000 - completed.quote.totalMinor);
+  assert.equal(completed.financial.finalBalanceMinor, 50000 - completed.quote.totalMinor);
+  assert.equal(completed.financial.netChargedMinor, completed.quote.totalMinor);
+  assert.equal(completed.financial.outcome, 'confirmed');
+
+  const declinedService = makeService();
+  const declined = run(declinedService, 'I want earphones', 'unknown-payment');
+  const declinedResult = declinedService.reconcilePayment(declined.body.task.id, 'reconcile-declined', 'declined');
+  const declinedTask = declinedResult.body.task;
+  assert.equal(declinedTask.financial.balanceBeforeMinor, 50000);
+  assert.equal(declinedTask.financial.balanceAfterPaymentMinor, null);
+  assert.equal(declinedTask.financial.finalBalanceMinor, 50000);
+  assert.equal(declinedTask.financial.netChargedMinor, 0);
+  assert.equal(declinedTask.financial.outcome, 'declined');
+  assert.equal(declinedService.getWalletLedger().length, 0);
+});
+
+test('financial snapshots and safe projection survive restart and reload', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'navipay-financial-'));
+  const filePath = path.join(directory, 'state.json');
+  try {
+    const service = makeService(new JsonStore(filePath));
+    const result = run(service, 'I want a keyboard', 'order-failure', 'restart-compensation');
+    const taskId = result.body.task.id;
+    const reloaded = makeService(new JsonStore(filePath));
+    const task = reloaded.getTask(taskId);
+    const projection = reloaded.getTaskProjection(taskId);
+    assert.equal(task.financial.finalBalanceMinor, 50000);
+    assert.equal(projection.version, 1);
+    assert.equal(projection.financial.netChargedMinor, 0);
+    assert.equal(projection.timeline.some((event) => event.type === 'payment.compensated'), true);
+    assert.equal(JSON.stringify(projection).includes('rawProviderPayload'), false);
+    assert.equal(JSON.stringify(projection).includes('credentials'), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('delivery failure preserves confirmed purchase and order status', () => {
@@ -162,6 +214,13 @@ test('HTTP browser contract runs a natural request and exposes safe receipt and 
     assert.equal(payload.task.state, 'completed');
     assert.equal(payload.task.receipt.item, 'Logitech MX Master 3S');
     assert.equal(payload.task.delivery.status, 'delivered');
+    assert.equal(payload.projection.version, 1);
+    assert.equal(payload.projection.quote.totalMinor, payload.task.quote.totalMinor);
+    assert.equal(payload.projection.financial.finalBalanceMinor, payload.task.financial.finalBalanceMinor);
+    assert.ok(payload.projection.timeline.some((event) => event.type === 'purchase.completed'));
+    assert.doesNotMatch(JSON.stringify(payload.projection), /rawProviderPayload|private.?key|credentials|password|customer\.address\.lines/i);
+    const projection = await fetch(`${base}/api/tasks/${payload.task.id}/projection`).then((value) => value.json());
+    assert.equal(projection.projection.taskId, payload.task.id);
     const receipt = await fetch(`${base}/api/tasks/${payload.task.id}/receipt`).then((value) => value.json());
     const audit = await fetch(`${base}/api/tasks/${payload.task.id}/audit`).then((value) => value.json());
     assert.equal(receipt.receipt.status, 'confirmed');

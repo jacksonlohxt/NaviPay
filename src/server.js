@@ -65,13 +65,15 @@ function routeSandboxApi(service, req, res, url) {
     return readBody(req).then(() => json(res, 200, service.reset()));
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
-    return json(res, 200, { tasks: service.listTasks(), wallet: service.getWallet(), mode: 'simulated local sandbox' });
+    const tasks = service.listTasks();
+    return json(res, 200, { tasks, projections: tasks.map((task) => service.getTaskProjection(task.id)), wallet: service.getWallet(), mode: 'simulated local sandbox' });
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
     return readBody(req).then((body) => {
       const input = body || {};
       if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_TASK_REQUEST', 'Task request must be a JSON object.');
-      return json(res, 201, { task: service.createTask({ request: input.request, scenario: input.scenario || 'happy' }) });
+      const task = service.createTask({ request: input.request, scenario: input.scenario || 'happy' });
+      return json(res, 201, { task, projection: service.getTaskProjection(task.id) });
     });
   }
   if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'purchases' && segments[2] === 'run' && method === 'POST') {
@@ -92,7 +94,10 @@ function routeSandboxApi(service, req, res, url) {
     });
   }
   if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
-    return json(res, 200, { task: service.getTask(segments[2]) });
+    return json(res, 200, { task: service.getTask(segments[2]), projection: service.getTaskProjection(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'projection' && method === 'GET') {
+    return json(res, 200, { projection: service.getTaskProjection(segments[2]) });
   }
   if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'audit' && method === 'GET') {
     return json(res, 200, { events: service.getAudit(segments[2]) });

@@ -24,8 +24,8 @@ npm run check
 
 1. Enter a plain request in the single request field, such as `I want a keyboard`, then press **Run purchase** once.
 2. Follow the quiet four-part progress summary as NaviPay finds an item, pays from the fake wallet, prepares the order, and delivers it. There are no stage-by-stage controls on the normal path.
-3. See the outcome at a glance: the requested item, selected merchant, amount spent, starting and remaining fake balance, order status, and delivery status.
-4. If the request needs a choice or a payment result needs confirmation, NaviPay explains what to do in the **Advanced details** section. The same section contains optional inventory, ledger, chain, adapter, references, and audit evidence for inspection.
+3. See the outcome at a glance: the interpreted request, selected merchant and rationale, quote breakdown, wallet before/after-payment/final balance, inventory, payment, order, fulfillment, delivery, and receipt status.
+4. If the request needs a choice or a payment result needs confirmation, NaviPay explains what to do in the **Advanced details** section. The calm primary view shows the interpreted request, selection rationale, subtotal/shipping/tax/total, wallet before/after-payment/final balances, inventory, payment, order, fulfillment, delivery, and receipt outcome. Technical references, ledger legs, operations, chain evidence, and the safe activity timeline stay expandable.
 
 The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00.
 
@@ -41,6 +41,10 @@ The customer and address are deliberately labeled simulated and are stored as re
 All adapter responses are normalized server-side. The browser receives status, references, and safe evidence only, never raw provider payloads or credentials.
 
 ## API boundary
+
+Every sandbox task response includes the legacy `task` object for deliberate compatibility and a versioned server-owned `projection` read model. The projection is the browser contract and contains only interpreted request data, recommendation rationale and catalog evidence, the locked quote and expiry, inventory reservation, financial snapshots, payment, merchant credit, order, fulfillment, delivery, receipt, safe operations, and a redacted timeline. It never includes provider payloads, credentials, or full customer address details. `GET /api/tasks/:id/projection` retrieves the same projection after a reload; list responses include `projections`.
+
+Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaymentMinor`, `finalBalanceMinor`, `netChargedMinor`, compensation status and references, and a financial `outcome`. This keeps compensation and unknown-payment reconciliation truthful after process restart.
 
 - `POST /api/purchases/run` with `{ "request": "I want a mouse" }` runs the complete bounded lifecycle. Send an `Idempotency-Key` header.
 - `POST /api/tasks/:id/run` resumes a run waiting for an explicit candidate selection.
@@ -67,7 +71,7 @@ The server supports deterministic local scenarios for integration testing: `insu
 
 ## Future organizer adapters
 
-The local adapters are intentionally narrow replacement points. A future approved organizer integration can implement the canonical methods in `src/sandbox.js` for discovery, funding lookup, inventory reservation, wallet transfer, merchant credit, order, fulfillment, or delivery. Normalize provider status, timeout, and reference data inside that adapter, keep credentials in the provider process, and preserve the server-owned operation IDs, exact quote, inventory-before-payment invariant, idempotency, compensation, and redacted browser contract. The local fixtures remain the default until an approved provider contract and credentials exist.
+The local adapters are intentionally narrow replacement points. A future approved organizer integration can implement the canonical methods in `src/sandbox.js` for discovery, funding lookup, inventory reservation, wallet transfer, merchant credit, order, fulfillment, or delivery. Normalize provider status, timeout, and reference data inside that adapter, keep credentials in the provider process, and preserve the server-owned operation IDs, exact quote, inventory-before-payment invariant, idempotency, compensation, and redacted browser contract. The local fixtures remain the default until an approved provider contract and credentials exist. Adapters must return normalized facts to the service; projection builders are the only boundary used by browser read APIs.
 
 ## Deliberate boundary
 
