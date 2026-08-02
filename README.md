@@ -22,14 +22,12 @@ npm run check
 
 ## Product walkthrough
 
-1. Open the operator console and enter a plain request in the single request field.
-2. Press **Run purchase** once. There are no stage-by-stage controls on the happy path.
-3. Review the interpreted brand, category, and keywords; the recommended item; merchant, SKU and variant evidence; exact XSGD quote; and stock reservation.
-4. Watch the server-owned progress record advance through intent, discovery, quote, inventory, wallet payment, merchant credit, order, fulfillment, delivery, receipt, and audit.
-5. Confirm the separate fake wallet balance. The wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00. The UI also shows a separate simulated chain observation; it is evidence, not the spendable balance.
-6. Review the fixture delivery address, order and delivery statuses, confirmed receipt, operation references, and append-only redacted audit evidence.
+1. Enter a plain request in the single request field, such as `I want a keyboard`, then press **Run purchase** once.
+2. Follow the quiet four-part progress summary as NaviPay finds an item, pays from the fake wallet, prepares the order, and delivers it. There are no stage-by-stage controls on the normal path.
+3. See the outcome at a glance: the requested item, selected merchant, amount spent, starting and remaining fake balance, order status, and delivery status.
+4. If the request needs a choice or a payment result needs confirmation, NaviPay explains what to do in the **Advanced details** section. The same section contains optional inventory, ledger, chain, adapter, references, and audit evidence for inspection.
 
-The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`.
+The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00.
 
 ## Local fake environments
 
