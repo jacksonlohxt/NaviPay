@@ -42,21 +42,20 @@ All adapter responses are normalized server-side. The browser receives status, r
 
 ## Optional local browser discovery prototype
 
-The default is still the seeded catalog. The bounded Playwright experiment is opt-in and only accepts local hosts or exact domains listed in `NAVIPAY_DISCOVERY_ALLOWLIST`:
+The default is still the seeded catalog. To visibly test the browser fixture flow without setting environment variables by hand:
 
 ```sh
-# Serve replay-only fixture pages from this repository in another terminal.
-python3 -m http.server 43123 --directory fixtures
-
-NAVIPAY_PLAYWRIGHT_DISCOVERY=1 \
-NAVIPAY_DISCOVERY_ALLOWLIST=127.0.0.1 \
-NAVIPAY_DISCOVERY_URLS=http://127.0.0.1:43123/merchants/harbor-supply.html \
-npm start
+# Optional, for the browser-source success path (the default install does not need this).
+npm install --no-save playwright
+npx playwright install chromium
+npm run demo:playwright
 ```
 
-The adapter runs in a separate worker process, permits only GET and HEAD requests, and enforces page, tab, redirect, response-size, candidate, and deadline limits. It sends no credentials, uses no proxy, performs no arbitrary page evaluation, and has no checkout, order, inventory, or payment capability. If Playwright is not installed, navigation is blocked, data is malformed or stale, a limit is exceeded, or the worker fails, NaviPay returns the stable `DISCOVERY_UNAVAILABLE` status and uses the explicitly labelled mock catalog fallback. Playwright is an optional local development tool and is not required for the default product or CI.
+Then open <http://127.0.0.1:3000>, enter exactly `I want an Apple Magic Keyboard`, and press **Run purchase**. The result should show a **Local browser fixture** Discovery badge, a plain-language recommendation-only explanation, and the Apple Magic Keyboard recommendation. Expand **Advanced details** to see the selected fixture source URL, observed time, and match rationale. Stop both local processes with Ctrl-C. The script serves the replay-only fixture merchant on port 43123 and starts NaviPay with Playwright discovery enabled, allowlisted to `127.0.0.1`.
 
-Browser discovery is recommendation-only. Approved merchant APIs remain mandatory for the final quote, inventory authority, order creation, and payment authority. A fixture result can never reserve stock, authorize money, create an order, or invoke payment.
+If the optional `playwright` package or its browser is unavailable, the same steps show **Seeded catalog fallback** and explain that browser discovery was unavailable. The default `npm start` path shows **Seeded catalog** and never attempts browser discovery. The browser mode is read-only and recommendation-only: its candidate is not an authoritative quote and cannot reserve inventory, authorize payment, create an order, or invoke checkout. Approved merchant adapters remain mandatory for the authoritative quote, inventory, order, fulfillment, and payment boundaries.
+
+The adapter runs in a separate worker process, permits only GET and HEAD requests, and enforces page, tab, redirect, response-size, candidate, and deadline limits. It sends no credentials, uses no proxy, performs no arbitrary page evaluation, and has no checkout, order, inventory, or payment capability. If navigation is blocked, data is malformed or stale, a limit is exceeded, or the worker fails, NaviPay returns the stable `DISCOVERY_UNAVAILABLE` status and uses the explicitly labelled seeded catalog fallback. Playwright is an optional local development tool and is not required for the default product or CI.
 
 ## API boundary
 
@@ -70,6 +69,8 @@ Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaym
 - `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/receipt`, and `GET /api/tasks/:id/audit` expose persisted safe views.
 - `GET /api/wallet` exposes the seeded fake balance and ledger evidence. `GET /api/catalog` exposes safe catalog and stock facts.
 - `POST /api/reset` clears local purchase history and restores the seeded wallet and inventory.
+
+`GET /api/discovery` and the `discovery` field in task-list and purchase-run responses expose the server-owned, read-only discovery configuration projection. It reports whether the seeded catalog or local browser fixture is active, whether fallback is available, and the safe explanation shown by the UI. It never returns configured URLs, allowlists, worker details, credentials, or provider payloads. The selected candidate projection exposes only the validated source URL, observed timestamp, and match rationale for Advanced details.
 
 The server entrypoint is `src/server.js`. The product orchestration and adapter contracts are in `src/sandbox.js`. The JSON store is in `src/store.js`.
 

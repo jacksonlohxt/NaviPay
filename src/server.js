@@ -64,9 +64,12 @@ function routeSandboxApi(service, req, res, url) {
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'reset' && method === 'POST') {
     return readBody(req).then(() => json(res, 200, service.reset()));
   }
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'discovery' && method === 'GET') {
+    return json(res, 200, { discovery: service.getDiscoveryProjection() });
+  }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
     const tasks = service.listTasks();
-    return json(res, 200, { tasks, projections: tasks.map((task) => service.getTaskProjection(task.id)), wallet: service.getWallet(), mode: 'simulated local sandbox' });
+    return json(res, 200, { tasks, projections: tasks.map((task) => service.getTaskProjection(task.id)), wallet: service.getWallet(), discovery: service.getDiscoveryProjection(), mode: 'simulated local sandbox' });
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
     return readBody(req).then((body) => {

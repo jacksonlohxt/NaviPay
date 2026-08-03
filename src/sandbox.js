@@ -1,6 +1,6 @@
 const crypto = require('node:crypto');
 const { AdapterError } = require('./adapters');
-const { createConfiguredDiscoveryAdapter, PlaywrightDiscoveryAdapter } = require('./playwright-discovery');
+const { createConfiguredDiscoveryAdapter, DISCOVERY_SOURCE, PlaywrightDiscoveryAdapter, isApprovedUrl } = require('./playwright-discovery');
 const { CURRENCY } = require('./domain');
 
 const SANDBOX_MODE = 'simulated local sandbox';
@@ -53,6 +53,22 @@ const CATALOG = Object.freeze([
     taxMinor: 1060,
     quantity: 5,
     keywords: ['logitech', 'keyboard', 'keyboards', 'wireless', 'compact']
+  },
+  {
+    merchantId: 'merchant-orchard-electronics',
+    merchant: 'Orchard Electronics',
+    merchantDomain: 'orchard-electronics.local',
+    sku: 'sku-apple-magic-keyboard',
+    variantId: 'variant-usb-c-rechargeable',
+    brand: 'Apple',
+    productCategory: 'keyboards',
+    item: 'Apple Magic Keyboard',
+    variant: 'Wireless keyboard with USB-C charging',
+    priceMinor: 15900,
+    shippingMinor: 0,
+    taxMinor: 1272,
+    quantity: 3,
+    keywords: ['apple', 'magic', 'keyboard', 'keyboards', 'wireless']
   },
   {
     merchantId: 'merchant-circuit-market',
@@ -730,8 +746,13 @@ function publicWallet(wallet) {
 
 const TASK_PROJECTION_VERSION = 1;
 
-function safeCandidate(candidate) {
+function safeCandidate(candidate, { sourceAllowlist = [] } = {}) {
   if (!candidate) return null;
+  let safeSourceUrl = null;
+  if (candidate.sourceUrl || candidate.evidence?.sourceUrl) {
+    const value = candidate.sourceUrl || candidate.evidence.sourceUrl;
+    if (isApprovedUrl(value, sourceAllowlist)) safeSourceUrl = new URL(value).toString();
+  }
   return {
     id: candidate.id,
     merchant: candidate.merchant,
@@ -753,12 +774,12 @@ function safeCandidate(candidate) {
     relevanceScore: candidate.relevanceScore,
     matchReasons: Array.isArray(candidate.matchReasons) ? [...candidate.matchReasons] : [],
     quoteExpiresAt: candidate.quoteExpiresAt,
-    sourceUrl: candidate.sourceUrl || candidate.evidence?.sourceUrl || null,
+    sourceUrl: safeSourceUrl,
     evidence: candidate.evidence ? {
       type: candidate.evidence.type,
       source: candidate.evidence.source,
-      observedAt: candidate.evidence.observedAt,
-      sourceUrl: candidate.evidence.sourceUrl || candidate.sourceUrl || null,
+      observedAt: candidate.evidence.observedAt || null,
+      sourceUrl: safeSourceUrl,
       note: candidate.evidence.note
     } : null
   };
@@ -821,13 +842,27 @@ function projectFinancial(task, walletBalanceMinor = null) {
   };
 }
 
-function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMinor = null } = {}) {
-  const candidates = (task.quote?.candidates || []).map(safeCandidate);
-  const selected = safeCandidate(task.quote?.lockedSnapshot) || candidates.find((candidate) => candidate.id === task.quote?.selectedCandidateId) || null;
+function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMinor = null, sourceAllowlist = [] } = {}) {
+  const candidates = (task.quote?.candidates || []).map((candidate) => safeCandidate(candidate, { sourceAllowlist }));
+  const selected = safeCandidate(task.quote?.lockedSnapshot, { sourceAllowlist }) || candidates.find((candidate) => candidate.id === task.quote?.selectedCandidateId) || null;
+  const browserDiscovery = task.quote?.mode === 'read-only Playwright fixture';
+  const discoveryUnavailable = task.quote?.discoveryStatus?.status === 'unavailable';
+  const discovery = task.quote ? {
+    source: discoveryUnavailable ? DISCOVERY_SOURCE.FALLBACK : browserDiscovery ? DISCOVERY_SOURCE.BROWSER_FIXTURE : DISCOVERY_SOURCE.SEEDED_CATALOG,
+    status: discoveryUnavailable ? 'unavailable' : browserDiscovery ? 'available' : 'available',
+    label: discoveryUnavailable ? 'Seeded catalog fallback' : browserDiscovery ? 'Local browser fixture' : 'Seeded catalog',
+    explanation: discoveryUnavailable
+      ? 'Browser discovery was unavailable, so NaviPay used its seeded local catalog instead.'
+      : browserDiscovery
+        ? 'A read-only local browser fixture recommended this item. It cannot provide the authoritative quote, inventory, or payment.'
+        : 'NaviPay matched this request against its seeded local merchant catalog.',
+    recommendationOnly: Boolean(task.quote.recommendationOnly),
+    fallback: discoveryUnavailable ? 'seeded_catalog' : null
+  } : null;
   const reservation = task.inventory?.reservation;
   const quote = task.quote ? {
     status: task.quote.locked ? 'locked' : 'open',
-    source: task.quote.source || null,
+    source: discovery?.label || null,
     recommendationOnly: Boolean(task.quote.recommendationOnly),
     discoveryStatus: task.quote.discoveryStatus || { status: 'available', code: null, message: null },
     merchantId: task.quote.merchantId || selected?.merchantId || null,
@@ -882,6 +917,7 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
       } : null
     },
     recommendation: quote?.recommendation || null,
+    discovery,
     quote,
     inventory: task.inventory ? {
       status: task.inventory.status,
@@ -1064,7 +1100,7 @@ class NaviPaySandboxService {
     const task = this.getTask(taskId);
     const runStatus = task.automation.status;
     const projection = this.getTaskProjection(taskId);
-    return { statusCode, body: { task, projection, run: { status: runStatus, nextAction: task.automation.nextAction, automatic: task.automation.automatic }, replayed } };
+    return { statusCode, body: { task, projection, discovery: this.getDiscoveryProjection(), run: { status: runStatus, nextAction: task.automation.nextAction, automatic: task.automation.automatic }, replayed } };
   }
 
   createTask({ request, scenario = 'happy', origin = 'operator', replayOf = null } = {}) {
@@ -1147,7 +1183,8 @@ class NaviPaySandboxService {
     return projectTask(task, {
       operations: this.store.data.operations,
       auditEvents: this.store.data.auditEvents,
-      walletBalanceMinor: this.store.data.wallets[task.walletId]?.balanceMinor ?? null
+      walletBalanceMinor: this.store.data.wallets[task.walletId]?.balanceMinor ?? null,
+      sourceAllowlist: this.discoveryAdapter.allowlist || []
     });
   }
 
@@ -1161,6 +1198,21 @@ class NaviPaySandboxService {
         addressLabel: task.receipt.customer.address?.label || null,
         disclosure: task.receipt.customer.disclosure
       } : null
+    };
+  }
+
+  getDiscoveryProjection() {
+    if (typeof this.discoveryAdapter.getProjection === 'function') return clone(this.discoveryAdapter.getProjection());
+    return {
+      version: 1,
+      mode: DISCOVERY_SOURCE.SEEDED_CATALOG,
+      status: 'disabled',
+      label: 'Seeded catalog',
+      explanation: 'NaviPay is using its seeded local merchant catalog.',
+      enabled: false,
+      readOnly: true,
+      recommendationOnly: false,
+      fallback: { enabled: true, source: DISCOVERY_SOURCE.SEEDED_CATALOG, label: 'Seeded catalog' }
     };
   }
 

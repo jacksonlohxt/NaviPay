@@ -5,6 +5,7 @@ const path = require('node:path');
 const { NaviPayService } = require('../src/domain');
 const { createServer } = require('../src/server');
 const { MemoryStore } = require('../src/store');
+const { LocalDiscoveryAdapter, NaviPaySandboxService } = require('../src/sandbox');
 const {
   MockCheckoutAdapter,
   MockDiscoveryAdapter,
@@ -176,6 +177,75 @@ test('browser adapter uses the worker result when enabled and falls back safely 
   assert.equal(failed.discoveryStatus.status, 'unavailable');
   assert.equal(failed.discoveryStatus.code, 'DISCOVERY_UNAVAILABLE');
   assert.match(failed.source, /MOCK FALLBACK/);
+});
+
+test('sandbox reports default seeded catalog discovery mode through the read API', async () => {
+  const service = new NaviPaySandboxService({ store: new MemoryStore(), clock: () => new Date('2026-01-01T10:00:00.000Z') });
+  const server = createServer({ service });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const response = await fetch(`${base}/api/discovery`);
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.discovery.mode, 'seeded_catalog');
+    assert.equal(payload.discovery.status, 'disabled');
+    assert.equal(payload.discovery.readOnly, true);
+    assert.equal(payload.discovery.fallback.source, 'seeded_catalog');
+    assert.equal((await fetch(`${base}/api/tasks`).then((result) => result.json())).discovery.mode, 'seeded_catalog');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('sandbox projection reports browser success and exposes only safe selected evidence', () => {
+  const clock = () => new Date('2026-01-01T10:05:00.000Z');
+  const fallback = new LocalDiscoveryAdapter({ clock });
+  const candidate = browserCandidate({ observedAt: '2026-01-01T10:00:00.000Z', expiresAt: '2026-01-01T10:15:00.000Z' });
+  const discovery = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/catalog'], clock, fallback, workerRunner: () => ({ discoveredAt: candidate.observedAt, candidates: [candidate] }) });
+  const service = new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery } });
+  const result = service.startPurchase({ idempotencyKey: 'browser-success', request: 'I want Logitech keyboard' });
+  assert.equal(result.body.projection.discovery.source, 'local_browser_fixture');
+  assert.equal(result.body.projection.discovery.recommendationOnly, true);
+  const selected = result.body.projection.quote.candidates[0];
+  assert.equal(result.body.task.state, 'awaiting_selection');
+  assert.equal(selected.sourceUrl, 'https://fixture.test/keyboard');
+  assert.equal(selected.evidence.observedAt, candidate.observedAt);
+  assert.deepEqual(selected.matchReasons, ['Brand match: Logitech', 'Category match: keyboards', 'Keyword matches: logitech, keyboard']);
+  assert.doesNotMatch(JSON.stringify(result.body.projection), /workerRunner|credentials|password|rawPayload/i);
+});
+
+test('sandbox reports unavailable browser discovery while safely using the seeded fallback', () => {
+  const clock = () => new Date('2026-01-01T10:05:00.000Z');
+  const fallback = new LocalDiscoveryAdapter({ clock });
+  const discovery = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/catalog'], clock, fallback, workerRunner: () => { throw new Error('offline'); } });
+  const service = new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery } });
+  const result = service.startPurchase({ idempotencyKey: 'browser-fallback', request: 'I want an Apple Magic Keyboard' });
+  assert.equal(result.body.projection.discovery.source, 'seeded_catalog_fallback');
+  assert.equal(result.body.projection.discovery.status, 'unavailable');
+  assert.equal(result.body.projection.quote.discoveryStatus.code, 'DISCOVERY_UNAVAILABLE');
+  assert.equal(result.body.projection.quote.source, 'Seeded catalog fallback');
+  assert.equal(result.body.task.state, 'completed');
+});
+
+test('default local purchase behavior remains seeded and supports the visible Apple keyboard request', () => {
+  const clock = () => new Date('2026-01-01T10:05:00.000Z');
+  const service = new NaviPaySandboxService({ store: new MemoryStore(), clock });
+  const result = service.startPurchase({ idempotencyKey: 'local-apple-keyboard', request: 'I want an Apple Magic Keyboard' });
+  assert.equal(result.body.task.state, 'completed');
+  assert.equal(result.body.projection.discovery.source, 'seeded_catalog');
+  assert.equal(result.body.projection.quote.item, 'Apple Magic Keyboard');
+});
+
+test('frontend uses the safe discovery projection for badges and advanced evidence', () => {
+  const frontend = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.match(frontend, /discoveryBadge/);
+  assert.match(frontend, /Local browser fixture/);
+  assert.match(frontend, /Seeded catalog fallback/);
+  assert.match(frontend, /Source URL/);
+  assert.match(frontend, /Observed/);
+  assert.match(frontend, /Match rationale/);
+  assert.match(frontend, /recommendationOnly/);
 });
 
 test('HTTP request-to-purchase flow uses persisted discovery and lifecycle routes', async () => {

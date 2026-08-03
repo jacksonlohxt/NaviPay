@@ -36,6 +36,13 @@ button:disabled { cursor: wait; opacity: .62; }
 .mode-badge-dark { border-color: rgba(189, 244, 119, .3); background: rgba(189, 244, 119, .15); color: var(--lime); }
 .mode-badge-light { border-color: #c9dda5; background: #eff4d8; color: #4b6e36; }
 .mode-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.discovery-badge { display: inline-flex; align-items: center; gap: .4rem; width: max-content; padding: .36rem .58rem; border: 1px solid #c9dda5; border-radius: 999px; background: #eff4d8; color: #4b6e36; font-size: .59rem; font-weight: 900; letter-spacing: .04em; line-height: 1; white-space: nowrap; }
+.discovery-badge.browser { border-color: #a9cfd0; background: #e4f2ef; color: #28645e; }
+.discovery-badge.fallback { border-color: #ecd599; background: var(--yellow); color: #7a6428; }
+.discovery-config { margin: .75rem 0 0 !important; color: #abc6b8; font-size: .66rem !important; line-height: 1.45; }
+.discovery-config > span { margin-right: .35rem; color: #d5e4db; font-weight: 850; }
+.discovery-config .discovery-badge { margin-right: .25rem; padding: .3rem .48rem; font-size: .54rem; }
+
 
 .main-content { width: min(1040px, 100%); margin: 0 auto; padding: clamp(1rem, 5vw, 3.8rem) clamp(1rem, 5vw, 2.5rem) 4rem; }
 .loading-state { display: flex; min-height: 50vh; align-items: center; justify-content: center; gap: .65rem; color: var(--muted); font-weight: 750; }
@@ -82,6 +89,8 @@ button:disabled { cursor: wait; opacity: .62; }
 .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; margin-bottom: .9rem; }
 .panel-heading h2 { margin: .25rem 0 0; font-size: 1.2rem; letter-spacing: -.045em; }
 .product-panel { grid-area: product; background: #fcfff6; }
+.discovery-explanation { display: flex; align-items: baseline; gap: .45rem; margin: -.25rem 0 .75rem; color: var(--muted); font-size: .68rem; }
+.discovery-explanation strong { color: var(--ink-soft); font-size: .67rem; }
 .product-highlight { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; padding: 1rem; border-radius: 16px; background: var(--lime); }
 .product-highlight strong, .product-highlight small { display: block; }
 .product-highlight strong { margin-top: .25rem; font-size: 1.1rem; letter-spacing: -.03em; }
@@ -146,6 +155,8 @@ button:disabled { cursor: wait; opacity: .62; }
 .candidate-end { display: grid; justify-items: end; gap: .2rem; text-align: right; }
 .candidate-end strong { white-space: nowrap; }
 .candidate-end small { color: var(--ink-soft); }
+.selection-evidence { margin-top: .75rem; padding: .75rem; border: 1px solid var(--line); border-radius: 11px; background: rgba(217,241,229,.38); }
+.selection-evidence h4 { margin: 0 0 .25rem; color: var(--ink-soft); font-size: .72rem; }
 .secondary-button, .quiet-button { min-height: 31px; padding: .35rem .65rem; border-radius: 8px; font-size: .68rem; font-weight: 850; }
 .secondary-button { border: 1px solid var(--ink); background: var(--ink); color: white; }
 .quiet-button { border: 1px solid var(--line); background: transparent; color: var(--ink); }

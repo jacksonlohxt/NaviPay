@@ -4,6 +4,11 @@ const { spawnSync } = require('node:child_process');
 const { AdapterError } = require('./adapters');
 
 const DISCOVERY_UNAVAILABLE_MESSAGE = 'Browser discovery is unavailable; the seeded local catalog was used.';
+const DISCOVERY_SOURCE = Object.freeze({
+  SEEDED_CATALOG: 'seeded_catalog',
+  BROWSER_FIXTURE: 'local_browser_fixture',
+  FALLBACK: 'seeded_catalog_fallback'
+});
 const DEFAULT_LIMITS = Object.freeze({
   deadlineMs: 4000,
   maxPages: 5,
@@ -239,6 +244,47 @@ class PlaywrightDiscoveryAdapter {
     this.calls = 0;
   }
 
+  getProjection() {
+    const configured = this.enabled && this.startUrls.length > 0 && this.startUrls.length <= this.limits.maxPages && this.startUrls.every((url) => isApprovedUrl(url, this.allowlist));
+    if (!this.enabled) {
+      return {
+        version: 1,
+        mode: DISCOVERY_SOURCE.SEEDED_CATALOG,
+        status: 'disabled',
+        label: 'Seeded catalog',
+        explanation: 'NaviPay is using its seeded local merchant catalog. Local browser fixture discovery is off.',
+        enabled: false,
+        readOnly: true,
+        recommendationOnly: false,
+        fallback: { enabled: true, source: DISCOVERY_SOURCE.SEEDED_CATALOG, label: 'Seeded catalog' }
+      };
+    }
+    if (!configured) {
+      return {
+        version: 1,
+        mode: DISCOVERY_SOURCE.BROWSER_FIXTURE,
+        status: 'unavailable',
+        label: 'Browser discovery unavailable',
+        explanation: 'The local browser fixture is not configured, so NaviPay will use its seeded catalog instead.',
+        enabled: true,
+        readOnly: true,
+        recommendationOnly: true,
+        fallback: { enabled: true, source: DISCOVERY_SOURCE.SEEDED_CATALOG, label: 'Seeded catalog fallback' }
+      };
+    }
+    return {
+      version: 1,
+      mode: DISCOVERY_SOURCE.BROWSER_FIXTURE,
+      status: 'ready',
+      label: 'Local browser fixture',
+      explanation: 'Read-only local browser discovery can recommend an item. Approved merchant adapters still control quote, inventory, and payment.',
+      enabled: true,
+      readOnly: true,
+      recommendationOnly: true,
+      fallback: { enabled: true, source: DISCOVERY_SOURCE.SEEDED_CATALOG, label: 'Seeded catalog fallback' }
+    };
+  }
+
   discover(args = {}) {
     this.calls += 1;
     if (!this.enabled) return this.fallback.discover(args);
@@ -262,7 +308,7 @@ class PlaywrightDiscoveryAdapter {
       const discoveredAt = result.discoveredAt || now.toISOString();
       return {
         mode: 'read-only Playwright fixture',
-        source: 'Allowlisted local merchant fixture via read-only Playwright worker',
+        source: 'Local browser fixture discovery',
         recommendationOnly: true,
         discoveredAt,
         candidates: ranked,
@@ -295,6 +341,7 @@ function createConfiguredDiscoveryAdapter({ clock, fallback, catalog, env = proc
 }
 
 module.exports = {
+  DISCOVERY_SOURCE,
   ALLOWED_METHODS,
   DEFAULT_LIMITS,
   DISCOVERY_UNAVAILABLE_MESSAGE,
