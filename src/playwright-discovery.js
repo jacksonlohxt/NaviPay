@@ -28,6 +28,14 @@ const HARD_LIMITS = Object.freeze({
 const ALLOWED_METHODS = new Set(['GET', 'HEAD']);
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 const AVAILABILITY = new Set(['in_stock', 'limited', 'out_of_stock']);
+const DISCOVERY_RANKING_POLICY = Object.freeze({
+  version: 1,
+  score: 'brand match 100 + category match 60 + 7 per distinct request keyword',
+  eligible: 'in_stock candidates at or below the task spending ceiling',
+  winner: 'the eligible candidate with a unique highest score',
+  tie: 'equal highest scores require an explicit user choice',
+  sourceOrder: 'never breaks a score tie'
+});
 
 function isText(value) {
   return typeof value === 'string' && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value);
@@ -228,6 +236,33 @@ function rankCandidates(candidates, intent) {
   }).filter(Boolean).sort((left, right) => right.relevanceScore - left.relevanceScore || left._order - right._order).map(({ _order, ...candidate }) => candidate);
 }
 
+function selectClearWinner(candidates, { ceilingMinor = Number.POSITIVE_INFINITY } = {}) {
+  const eligible = (candidates || []).filter((candidate) => candidate.availability === 'in_stock' && candidate.totalMinor <= ceilingMinor);
+  if (!eligible.length) {
+    return {
+      status: 'unavailable',
+      candidate: null,
+      eligible,
+      reason: 'No in-stock candidate is within the task spending ceiling.'
+    };
+  }
+  const [winner, runnerUp] = eligible;
+  if (runnerUp && runnerUp.relevanceScore === winner.relevanceScore) {
+    return {
+      status: 'ambiguous',
+      candidate: null,
+      eligible,
+      reason: 'The best eligible candidates have the same deterministic match score.'
+    };
+  }
+  return {
+    status: 'clear',
+    candidate: winner,
+    eligible,
+    reason: 'Clear winner: the highest-scoring in-stock candidate within the task spending ceiling.'
+  };
+}
+
 function extractCandidatesFromHtml(html, sourceUrl, { now = new Date(), allowlist = [], replayClock = false } = {}) {
   if (typeof html !== 'string' || Buffer.byteLength(html, 'utf8') > DEFAULT_LIMITS.maxResponseBytes) {
     throw new AdapterError('DISCOVERY_RESPONSE_TOO_LARGE', 'The merchant fixture page exceeded the response-size limit.');
@@ -403,6 +438,7 @@ class PlaywrightDiscoveryAdapter {
         discoveredAt,
         candidates: ranked,
         recommendedCandidateId: ranked[0].id,
+        rankingPolicy: DISCOVERY_RANKING_POLICY,
         discoveryStatus: { status: 'available', code: null, message: 'Read-only fixture discovery completed.' }
       };
     } catch (error) {
@@ -444,5 +480,7 @@ module.exports = {
   normalizeCandidate,
   normalizeTargetUrl,
   rankCandidates,
-  validateExtractedCandidate
+  selectClearWinner,
+  validateExtractedCandidate,
+  DISCOVERY_RANKING_POLICY
 };

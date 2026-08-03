@@ -22,6 +22,7 @@ const {
   isApprovedUrl,
   isExplicitlyAllowlistedUrl,
   normalizeCandidate,
+  selectClearWinner,
   validateExtractedCandidate
 } = require('../src/playwright-discovery');
 
@@ -202,14 +203,16 @@ test('sandbox reports default seeded catalog discovery mode through the read API
 test('sandbox projection reports browser success and exposes only safe selected evidence', () => {
   const clock = () => new Date('2026-01-01T10:05:00.000Z');
   const fallback = new LocalDiscoveryAdapter({ clock });
-  const candidate = browserCandidate({ observedAt: '2026-01-01T10:00:00.000Z', expiresAt: '2026-01-01T10:15:00.000Z' });
+  const candidate = browserCandidate({ merchantId: 'merchant-harbor-supply', sku: 'sku-logitech-mx-keys-mini', variantId: 'variant-wireless-compact', item: 'Logitech MX Keys Mini', variant: 'Wireless compact keyboard', subtotalMinor: 12900, shippingMinor: 350, taxMinor: 1060, totalMinor: 14310, observedAt: '2026-01-01T10:00:00.000Z', expiresAt: '2026-01-01T10:15:00.000Z' });
   const discovery = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/catalog'], clock, fallback, workerRunner: () => ({ discoveredAt: candidate.observedAt, candidates: [candidate] }) });
   const service = new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery } });
   const result = service.startPurchase({ idempotencyKey: 'browser-success', request: 'I want Logitech keyboard' });
   assert.equal(result.body.projection.discovery.source, 'local_browser_fixture');
-  assert.equal(result.body.projection.discovery.recommendationOnly, true);
+  assert.equal(result.body.projection.discovery.recommendationOnly, false);
+  assert.equal(result.body.projection.quote.rankingPolicy.winner, 'the eligible candidate with a unique highest score');
   const selected = result.body.projection.quote.candidates[0];
-  assert.equal(result.body.task.state, 'awaiting_selection');
+  assert.equal(result.body.task.state, 'completed');
+  assert.equal(result.body.task.quote.item, 'Logitech MX Keys Mini');
   assert.equal(selected.sourceUrl, 'https://fixture.test/keyboard');
   assert.equal(selected.evidence.observedAt, candidate.observedAt);
   assert.deepEqual(selected.matchReasons, ['Brand match: Logitech', 'Category match: keyboards', 'Keyword matches: logitech, keyboard']);
@@ -244,12 +247,12 @@ test('target-site discovery selects each competition replay product before the e
     const service = new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery } });
     const discovered = service.startPurchase({ idempotencyKey: `competition-${expectedItem}`, request, targetSite: 'https://fixture.test/competition-site/' });
     assert.equal(workerInput.startUrls[0], 'https://fixture.test/competition-site/');
-    assert.equal(discovered.body.task.state, 'awaiting_selection');
+    assert.equal(discovered.body.task.state, 'completed');
     const candidate = discovered.body.task.quote.candidates.find((item) => item.item === expectedItem);
     assert.ok(candidate, expectedItem);
     assert.equal(discovered.body.projection.discovery.source, 'local_browser_fixture');
-    assert.equal(discovered.body.projection.quote.recommendationOnly, true);
-    const completed = service.resumePurchase(discovered.body.task.id, `select-${expectedItem}`, candidate.id);
+    assert.equal(discovered.body.projection.quote.recommendationOnly, false);
+    const completed = discovered;
     assert.equal(completed.body.task.state, 'completed');
     assert.equal(completed.body.task.quote.item, expectedItem);
     assert.equal(completed.body.task.inventory.reservation.status, 'committed');
@@ -266,7 +269,29 @@ test('target-site discovery selects each competition replay product before the e
   }
 });
 
-test('HTTP target-site discovery resumes into the same purchase safeguards', async () => {
+test('browser discovery auto-selects only a unique winner and pauses ties while no-match falls back safely', () => {
+  const clock = () => new Date('2026-01-01T10:05:00.000Z');
+  const fallback = new LocalDiscoveryAdapter({ clock });
+  const first = browserCandidate({ sku: 'sku-tie-one', variantId: 'variant-tie-one' });
+  const second = browserCandidate({ sku: 'sku-tie-two', variantId: 'variant-tie-two', item: 'Another Fixture Keyboard' });
+  const tieDiscovery = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/catalog'], clock, fallback, workerRunner: () => ({ discoveredAt: first.observedAt, candidates: [first, second] }) });
+  const tieService = new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery: tieDiscovery } });
+  const tied = tieService.startPurchase({ idempotencyKey: 'browser-tie', request: 'I want a keyboard', targetSite: 'https://fixture.test/catalog' });
+  assert.equal(selectClearWinner([first, second], { ceilingMinor: 100000 }).status, 'ambiguous');
+  assert.equal(tied.body.task.state, 'awaiting_selection');
+  assert.equal(tied.body.task.recommendation.status, 'ambiguous');
+  assert.match(tied.body.task.automation.nextAction, /tied|Choose/i);
+  assert.equal(tieService.getWalletLedger().length, 0);
+
+  const noMatchDiscovery = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/catalog'], clock, fallback, workerRunner: () => ({ discoveredAt: first.observedAt, candidates: [first] }) });
+  const noMatchService = new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery: noMatchDiscovery } });
+  const noMatch = noMatchService.startPurchase({ idempotencyKey: 'browser-no-match', request: 'I want a mouse', targetSite: 'https://fixture.test/catalog' });
+  assert.equal(noMatch.body.task.state, 'completed');
+  assert.equal(noMatch.body.projection.discovery.source, 'seeded_catalog_fallback');
+  assert.equal(noMatch.body.projection.quote.discoveryStatus.code, 'DISCOVERY_NO_MATCH');
+});
+
+test('HTTP target-site discovery runs the automatic safeguards', async () => {
   const clock = () => new Date('2026-01-01T10:05:00.000Z');
   const candidate = browserCandidate({
     merchantId: 'merchant-orchard-electronics',
@@ -278,6 +303,10 @@ test('HTTP target-site discovery resumes into the same purchase safeguards', asy
     productCategory: 'keyboards',
     item: 'Apple Magic Keyboard',
     variant: 'Wireless keyboard with USB-C charging',
+    subtotalMinor: 15900,
+    shippingMinor: 0,
+    taxMinor: 1272,
+    totalMinor: 17172,
     sourceUrl: 'https://fixture.test/competition-site/'
   });
   const fallback = new LocalDiscoveryAdapter({ clock });
@@ -292,10 +321,8 @@ test('HTTP target-site discovery resumes into the same purchase safeguards', asy
   try {
     const discovered = await post('/api/purchases/run', { request: 'Find an Apple Magic Keyboard', targetSite: 'https://fixture.test/competition-site/' }, 'http-target-discovery');
     assert.equal(discovered.status, 201);
-    assert.equal(discovered.payload.task.state, 'awaiting_selection');
-    const selected = discovered.payload.task.quote.candidates[0];
-    const completed = await post(`/api/tasks/${discovered.payload.task.id}/run`, { candidateId: selected.id }, 'http-target-selection');
-    assert.equal(completed.status, 200);
+    assert.equal(discovered.payload.task.state, 'completed');
+    const completed = discovered;
     assert.equal(completed.payload.task.state, 'completed');
     assert.equal(completed.payload.task.receipt.item, 'Apple Magic Keyboard');
     assert.equal(completed.payload.task.inventory.reservation.status, 'committed');
@@ -303,6 +330,40 @@ test('HTTP target-site discovery resumes into the same purchase safeguards', asy
     assert.equal(completed.payload.task.delivery.status, 'delivered');
   } finally {
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('HTTP target-site API auto-purchases keyboard, mouse, and earphone winners', async () => {
+  const replayCandidates = extractCandidatesFromHtml(
+    fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'competition-site', 'index.html'), 'utf8'),
+    'https://fixture.test/competition-site/',
+    { now: new Date('2026-01-01T10:05:00.000Z'), replayClock: true, allowlist: ['fixture.test'] }
+  );
+  for (const [request, expectedItem] of [
+    ['I want a keyboard', 'Apple Magic Keyboard'],
+    ['I want a mouse', 'Logitech MX Master 3S'],
+    ['I want earphones', 'Apple AirPods 4']
+  ]) {
+    const clock = () => new Date('2026-01-01T10:05:00.000Z');
+    const fallback = new LocalDiscoveryAdapter({ clock });
+    const discovery = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/competition-site/'], clock, fallback, workerRunner: () => ({ discoveredAt: replayCandidates[0].observedAt, candidates: replayCandidates }) });
+    const server = createServer({ service: new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery } }) });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const response = await fetch(`${base}/api/purchases/run`, { method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': `auto-${expectedItem}` }, body: JSON.stringify({ request, targetSite: 'https://fixture.test/competition-site/' }) });
+      const payload = await response.json();
+      assert.equal(response.status, 201);
+      assert.equal(payload.task.state, 'completed');
+      assert.equal(payload.task.quote.item, expectedItem);
+      assert.equal(payload.task.payment.status, 'authorized');
+      assert.equal(payload.task.receipt.status, 'confirmed');
+      assert.equal(payload.projection.discovery.source, 'local_browser_fixture');
+      assert.equal(payload.projection.quote.recommendationOnly, false);
+      assert.ok(payload.projection.progress.every((item) => item.status === 'completed'));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   }
 });
 

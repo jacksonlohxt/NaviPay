@@ -1,6 +1,6 @@
 const crypto = require('node:crypto');
 const { AdapterError } = require('./adapters');
-const { createConfiguredDiscoveryAdapter, DISCOVERY_SOURCE, PlaywrightDiscoveryAdapter, isExplicitlyAllowlistedUrl, normalizeTargetUrl } = require('./playwright-discovery');
+const { createConfiguredDiscoveryAdapter, DISCOVERY_SOURCE, DISCOVERY_RANKING_POLICY, PlaywrightDiscoveryAdapter, isExplicitlyAllowlistedUrl, normalizeTargetUrl, selectClearWinner } = require('./playwright-discovery');
 const { CURRENCY } = require('./domain');
 
 const SANDBOX_MODE = 'simulated local sandbox';
@@ -314,7 +314,8 @@ class LocalDiscoveryAdapter {
       discoveredAt,
       intent,
       candidates,
-      recommendedCandidateId: candidates[0].id
+      recommendedCandidateId: candidates[0].id,
+      rankingPolicy: 'Seeded catalog policy: category match, brand match, keyword matches, then stable catalog order.'
     };
   }
 }
@@ -870,6 +871,7 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
     source: discovery?.label || null,
     recommendationOnly: Boolean(task.quote.recommendationOnly),
     discoveryStatus: task.quote.discoveryStatus || { status: 'available', code: null, message: null },
+    rankingPolicy: task.quote.rankingPolicy || (browserDiscovery ? DISCOVERY_RANKING_POLICY : 'Seeded catalog policy: category match, brand match, keyword matches, then stable catalog order.'),
     merchantId: task.quote.merchantId || selected?.merchantId || null,
     merchant: task.quote.merchant || selected?.merchant || null,
     item: task.quote.item || selected?.item || null,
@@ -1370,10 +1372,16 @@ class NaviPaySandboxService {
     const authoritative = this.localDiscoveryAdapter.discover({ request: task.request, scenario: task.scenario });
     const match = authoritative.candidates.find((candidate) => candidate.merchantId === discoveredCandidate.merchantId && candidate.sku === discoveredCandidate.sku && candidate.variantId === discoveredCandidate.variantId);
     if (!match) return null;
+    const quoteFields = ['subtotalMinor', 'shippingMinor', 'taxMinor', 'totalMinor', 'currency'];
+    if (quoteFields.some((field) => discoveredCandidate[field] !== match[field])) {
+      throw new SandboxDomainError(409, 'AUTHORITATIVE_QUOTE_MISMATCH', 'The browser quote did not match the approved local quote, so no purchase was attempted.');
+    }
     return {
       ...match,
       id: discoveredCandidate.id,
       sourceUrl: discoveredCandidate.sourceUrl,
+      observedAt: discoveredCandidate.observedAt,
+      quoteExpiresAt: discoveredCandidate.quoteExpiresAt,
       evidence: discoveredCandidate.evidence,
       matchReasons: discoveredCandidate.matchReasons,
       relevanceScore: discoveredCandidate.relevanceScore,
@@ -1413,6 +1421,7 @@ class NaviPaySandboxService {
           discoveredAt: result.discoveredAt,
           candidates: result.candidates,
           recommendedCandidateId: result.recommendedCandidateId,
+          rankingPolicy: result.rankingPolicy || null,
           recommendationOnly: Boolean(result.recommendationOnly),
           discoveryStatus: result.discoveryStatus || { status: 'available', code: null, message: null },
           selectedCandidateId: null,
@@ -1429,18 +1438,40 @@ class NaviPaySandboxService {
       this._complete(taskId, 'discovery', result, result.discoveredAt);
       this._recordStageAudit(taskId, 'discovery', 'discovery.completed', 'success', `Found ${result.candidates.length} simulated in-catalog candidates.`, result);
       if (result.recommendationOnly) {
+        const selection = selectClearWinner(result.candidates, { ceilingMinor: task.spendingCeilingMinor });
+        if (selection.status === 'unavailable') {
+          const hasInStock = result.candidates.some((candidate) => candidate.availability === 'in_stock');
+          const code = hasInStock ? 'SPENDING_CEILING_EXCEEDED' : 'OUT_OF_STOCK';
+          const message = hasInStock
+            ? 'Every browser candidate exceeds the task spending ceiling; no purchase was attempted.'
+            : 'The approved site has no in-stock candidate for this request; no purchase was attempted.';
+          this._fail(taskId, hasInStock ? 'quote' : 'inventory', code, message);
+          return this._response(taskId, 409);
+        }
+        if (selection.status === 'ambiguous') {
+          this._updateTask(taskId, (current) => {
+            current.recommendation = {
+              status: 'ambiguous',
+              candidateId: null,
+              reason: `${selection.reason} Choose an item in Advanced details to continue.`,
+              autoSelectable: false
+            };
+            current.quote.recommendation = current.recommendation;
+            current.state = 'awaiting_selection';
+            current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Choose one of the tied browser results to cross-check the approved local quote.' };
+          });
+          return this._response(taskId);
+        }
+        candidateId = selection.candidate.id;
         this._updateTask(taskId, (current) => {
           current.recommendation = {
-            status: 'recommendation_only',
-            candidateId: result.recommendedCandidateId,
-            reason: 'Browser discovery is recommendation-only; select a result to cross-check it against the approved local quote before purchase safeguards run.',
-            autoSelectable: false
+            status: 'clear',
+            candidateId,
+            reason: `${selection.reason} NaviPay will cross-check its price and identity against the approved local quote before purchase safeguards run.`,
+            autoSelectable: true
           };
           current.quote.recommendation = current.recommendation;
-          current.state = 'awaiting_selection';
-          current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Select a browser result to cross-check the approved local quote before purchase.' };
         });
-        return this._response(taskId);
       }
     }
 

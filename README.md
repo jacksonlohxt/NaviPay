@@ -22,11 +22,11 @@ npm run check
 
 ## Product walkthrough
 
-1. Enter a purchase instruction such as `Find an Apple Magic Keyboard` and, when using browser discovery, enter the approved target site URL in **Target commerce site**. Press **Discover and purchase** once.
-2. Observe the discovery badge, target source status, selected item, source URL, observed time, evidence, and match rationale. If browser discovery returns a recommendation, select the result in **Advanced details** so NaviPay can cross-check the authoritative local quote.
-3. Follow the quiet four-part progress summary as NaviPay reserves fake inventory, pays from the fake wallet, prepares the order, and delivers it. There are no stage-by-stage controls on the normal path.
+1. Enter a purchase instruction such as `I want a keyboard` and, when using browser discovery, enter the approved target site URL in **Target commerce site**. Press **Discover and purchase** once.
+2. NaviPay ranks valid in-stock candidates with a deterministic policy: brand match, category match, distinct keyword matches, then a unique top score. A clear winner within the XSGD 1,000 task ceiling is selected automatically. The calm view shows the selected item, why it won, the discovery source, and source evidence.
+3. NaviPay cross-checks browser identity and quote amounts against the authoritative seeded local catalog, then automatically reserves inventory, verifies the fake wallet, transfers fake funds, confirms merchant credit, creates the order, fulfills it, delivers it, issues the receipt, and records the audit trail. The quiet four-part progress summary shows this work without stage-by-stage controls.
 4. See the outcome at a glance: the interpreted request, selected merchant and rationale, quote breakdown, wallet before/after-payment/final balance, inventory, payment, order, fulfillment, delivery, and receipt status.
-5. If the request needs a choice or a payment result needs confirmation, NaviPay explains what to do in the **Advanced details** section. The calm primary view shows the interpreted request, selection rationale, subtotal/shipping/tax/total, wallet before/after-payment/final balances, inventory, payment, order, fulfillment, delivery, and receipt outcome. Technical references, ledger legs, operations, chain evidence, and the safe activity timeline stay expandable.
+5. NaviPay pauses only for a genuine tie or ambiguity, malformed/stale/blocked discovery, no available or over-cap item, insufficient fake funds, an unknown payment result, or another safety exception. **Advanced details** explains the issue and available action. Technical references, ledger legs, operations, chain evidence, and the safe activity timeline stay expandable.
 
 The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00.
 
@@ -58,13 +58,12 @@ Then perform this exact test:
 2. Enter `Find an Apple Magic Keyboard` in **Purchase instruction**.
 3. Enter `http://127.0.0.1:43123/competition-site/` in **Target commerce site**. This is the local replay merchant served by the demo command.
 4. Press **Discover and purchase**.
-5. Observe the **Local browser fixture** badge, the selected Apple Magic Keyboard, source URL, observed time, and match rationale in **Advanced details**.
-6. Select **Select for purchase** if shown. NaviPay then cross-checks the result against the approved local quote and runs the fake inventory, wallet, order, fulfillment, delivery, receipt, and audit flow.
-7. Repeat with `Find a Logitech MX Master 3S` and `Find Apple AirPods 4` to exercise the mouse and earphone paths. Stop both local processes with Ctrl-C.
+5. Observe the **Local browser fixture** badge, the automatically selected Apple Magic Keyboard, why it won, source URL, observed time, and progress. No Advanced details or selection click is needed.
+6. Repeat with `I want a mouse` and `I want earphones` to exercise automatic mouse and earphone paths. A replay containing tied candidates pauses in **Advanced details**; a no-match or unsafe browser result is labelled and handled through the seeded fallback. Stop both local processes with Ctrl-C.
 
 The script serves `fixtures/competition-site/index.html` on port 43123 and starts NaviPay with Playwright discovery enabled, explicitly allowlisted to `127.0.0.1`. The target-site field never grants permission: a user URL is accepted only when its http or https scheme and host are already on that server-side allowlist. The worker sends no credentials and performs only bounded GET or HEAD reads. It never clicks search, checkout, order, or payment controls. The fixture's search form and product cards mirror the competition interaction while its normalized candidate payload is the deterministic replay seam.
 
-If the optional `playwright` package or its browser is unavailable, the same steps show **Seeded catalog fallback** and explain that browser discovery was unavailable. The default `npm start` path shows **Seeded catalog** and never attempts browser discovery. Browser evidence is recommendation-only until the user selects it and the server matches it to the approved local quote. Discovery itself never reserves inventory, authorizes payment, creates an order, or invokes checkout. Approved merchant adapters remain mandatory for the authoritative quote, inventory, order, fulfillment, and payment boundaries.
+If the optional `playwright` package or its browser is unavailable, the same steps show **Seeded catalog fallback** and explain that browser discovery was unavailable. The default `npm start` path shows **Seeded catalog** and never attempts browser discovery. Browser evidence is read-only and never has payment or checkout authority. NaviPay proceeds automatically only after a unique in-stock winner is ranked and the server matches its identity and quote amounts to the approved local quote. Discovery itself never reserves inventory, authorizes payment, creates an order, or invokes checkout. Approved merchant adapters remain mandatory for the authoritative quote, inventory, order, fulfillment, and payment boundaries.
 
 The adapter runs in a separate worker process, permits only GET and HEAD requests, and enforces page, tab, redirect, response-size, candidate, and deadline limits. It sends no credentials, uses no proxy, performs no arbitrary page evaluation, and has no checkout, order, inventory, or payment capability. If navigation is blocked, data is malformed or stale, a limit is exceeded, or the worker fails, NaviPay returns an unavailable discovery status with a safe reason code and uses the explicitly labelled seeded catalog fallback. Playwright is an optional local development tool and is not required for the default product or CI.
 
@@ -75,7 +74,7 @@ Every sandbox task response includes the legacy `task` object for deliberate com
 Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaymentMinor`, `finalBalanceMinor`, `netChargedMinor`, compensation status and references, and a financial `outcome`. This keeps compensation and unknown-payment reconciliation truthful after process restart.
 
 - `POST /api/purchases/run` with `{ "request": "I want a mouse" }` runs the complete bounded lifecycle. Send an `Idempotency-Key` header.
-- `POST /api/tasks/:id/run` resumes a run waiting for an explicit candidate selection.
+- `POST /api/tasks/:id/run` resumes a run waiting for an explicit candidate selection after a genuine ambiguity or tie.
 - `POST /api/tasks/:id/payment/reconcile` with `{ "resolution": "authorized" }` or `{ "resolution": "declined" }` resolves an unknown wallet result without retrying the transfer.
 - `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/receipt`, and `GET /api/tasks/:id/audit` expose persisted safe views.
 - `GET /api/wallet` exposes the seeded fake balance and ledger evidence. `GET /api/catalog` exposes safe catalog and stock facts.

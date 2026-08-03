@@ -76,10 +76,12 @@ function dataCell(label, value, note = '') {
 
 function failureMessage(task) {
   const code = task.failure?.code;
-  if (task.state === 'awaiting_selection') return task.quote?.recommendationOnly ? 'A read-only browser result is ready. Select it in Advanced details so NaviPay can cross-check the authoritative local quote before purchase.' : 'We found more than one good match. Choose the item you want in Advanced details to continue.';
+  if (task.state === 'awaiting_selection') return task.quote?.recommendationOnly ? 'There is no single best browser match. Choose one of the tied results in Advanced details so NaviPay can cross-check the authoritative local quote before purchase.' : 'We found more than one good match. Choose the item you want in Advanced details to continue.';
   if (task.state === 'reconciliation_required') return 'The payment result is unclear. Nothing will be tried again until you confirm what happened in Advanced details.';
   if (code === 'INSUFFICIENT_FUNDS') return 'There is not enough fake balance for this purchase. Nothing was charged.';
-  if (code === 'OUT_OF_STOCK') return 'The requested item is out of stock. Nothing was charged.';
+  if (code === 'OUT_OF_STOCK') return 'The approved source has no in-stock item for this request. Nothing was charged.';
+  if (code === 'SPENDING_CEILING_EXCEEDED') return 'Every available match is over the task ceiling. Nothing was charged.';
+  if (code === 'AUTHORITATIVE_QUOTE_MISMATCH') return 'The browser price did not match the approved local quote. Nothing was charged.';
   if (code === 'PAYMENT_DECLINED' || code === 'PAYMENT_DECLINED_RECONCILED') return 'The payment did not go through. Nothing was charged.';
   if (code === 'DELIVERY_FAILED') return 'The purchase is confirmed, but delivery could not be completed.';
   if (code === 'FULFILLMENT_FAILED') return 'The purchase is confirmed, but the order could not be prepared.';
@@ -87,6 +89,7 @@ function failureMessage(task) {
   if (code === 'DISCOVERY_DOMAIN_BLOCKED') return 'That target site is not approved. NaviPay did not fetch it and used the seeded local catalog instead.';
   if (code === 'DISCOVERY_NO_MATCH') return 'The approved site had no matching item. NaviPay used the seeded local catalog instead.';
   if (code === 'DISCOVERY_TIMEOUT') return 'The approved site took too long to answer. NaviPay used the seeded local catalog instead.';
+  if (code === 'MALFORMED_DISCOVERY_DATA' || code === 'STALE_DISCOVERY_DATA' || code === 'CONTRADICTORY_DISCOVERY_DATA') return 'The approved site returned unsafe or stale product data. NaviPay used the seeded local catalog instead.';
   if (code === 'INVALID_TARGET_SITE') return 'Enter an http or https target site URL without a username or password.';
   return 'We could not complete this purchase. No unconfirmed payment was left behind.';
 }
@@ -198,7 +201,9 @@ function bandDetail(task, band, stateName) {
 }
 
 function progressPanel(task) {
-  return `<section class="panel progress-panel"><div class="panel-heading"><div><span class="overline">Automatic progress</span><h2>${task.state === 'completed' ? 'All done' : 'NaviPay is on it'}</h2></div><span class="progress-caption">No manual steps</span></div><ol class="progress-track">${progressBands.map((band, index) => { const stateName = bandState(task, band); return `<li class="progress-step ${stateName}"><span class="progress-number">${stateName === 'success' ? '✓' : index + 1}</span><span><strong>${escapeHtml(band.label)}</strong><small>${escapeHtml(bandDetail(task, band, stateName))}</small></span></li>`; }).join('')}</ol></section>`;
+  const needsAction = ['awaiting_selection', 'reconciliation_required'].includes(task.state);
+  const caption = needsAction ? 'Action needed in Advanced details' : 'Runs automatically';
+  return `<section class="panel progress-panel"><div class="panel-heading"><div><span class="overline">Automatic progress</span><h2>${task.state === 'completed' ? 'All done' : 'NaviPay is on it'}</h2></div><span class="progress-caption">${caption}</span></div><ol class="progress-track">${progressBands.map((band, index) => { const stateName = bandState(task, band); return `<li class="progress-step ${stateName}"><span class="progress-number">${stateName === 'success' ? '✓' : index + 1}</span><span><strong>${escapeHtml(band.label)}</strong><small>${escapeHtml(bandDetail(task, band, stateName))}</small></span></li>`; }).join('')}</ol></section>`;
 }
 
 function detailValue(label, value) {
