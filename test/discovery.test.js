@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { NaviPayService } = require('../src/domain');
 const { createServer } = require('../src/server');
 const { MemoryStore } = require('../src/store');
@@ -11,6 +13,15 @@ const {
   parsePurchaseRequest,
   rankCatalogCandidates
 } = require('../src/adapters');
+const {
+  DEFAULT_LIMITS,
+  PlaywrightDiscoveryAdapter,
+  extractCandidatesFromHtml,
+  isAllowedMethod,
+  isApprovedUrl,
+  normalizeCandidate,
+  validateExtractedCandidate
+} = require('../src/playwright-discovery');
 
 function makeClock() {
   let tick = 0;
@@ -84,6 +95,87 @@ test('natural request candidates contain normalized quote, availability, evidenc
   assert.equal(candidate.evidence.type, 'local-catalog-fixture');
   assert.match(candidate.evidence.note, /DEMO \/ MOCK/);
   assert.equal(result.body.task.request.intent.productCategory, 'earphones');
+});
+
+function browserCandidate(overrides = {}) {
+  const observedAt = '2026-01-01T10:00:00.000Z';
+  return {
+    merchantId: 'merchant-fixture',
+    merchant: 'Fixture Merchant',
+    merchantDomain: 'fixture.test',
+    sku: 'sku-fixture-keyboard',
+    variantId: 'variant-fixture',
+    brand: 'Logitech',
+    productCategory: 'keyboards',
+    item: 'Fixture Keyboard',
+    variant: 'Wireless',
+    availability: 'in_stock',
+    currency: 'XSGD',
+    subtotalMinor: 1000,
+    shippingMinor: 100,
+    taxMinor: 90,
+    totalMinor: 1190,
+    observedAt,
+    expiresAt: '2026-01-01T10:15:00.000Z',
+    sourceUrl: 'https://fixture.test/keyboard',
+    evidence: { type: 'fixture-json', source: 'local fixture', observedAt, note: 'MOCK fixture.' },
+    ...overrides
+  };
+}
+
+test('read-only browser candidate extraction validates the complete quote schema', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'merchants', 'harbor-supply.html'), 'utf8');
+  const candidates = extractCandidatesFromHtml(html, 'http://127.0.0.1:43123/harbor-supply.html', { now: new Date('2026-08-03T05:05:00.000Z'), replayClock: true });
+  assert.equal(candidates[0].sku, 'sku-logitech-mx-keys-mini');
+  assert.equal(candidates[0].sourceUrl, 'http://127.0.0.1:43123/harbor-supply.html');
+  assert.equal(candidates[0].totalMinor, candidates[0].subtotalMinor + candidates[0].shippingMinor + candidates[0].taxMinor);
+});
+
+test('browser discovery policy allows local hosts and explicitly allowlisted domains only', () => {
+  assert.equal(isApprovedUrl('http://127.0.0.1:43123/catalog', []), true);
+  assert.equal(isApprovedUrl('https://fixture.test/catalog', ['fixture.test']), true);
+  assert.equal(isApprovedUrl('https://not-approved.test/catalog', ['fixture.test']), false);
+  assert.equal(isApprovedUrl('https://user:secret@fixture.test/catalog', ['fixture.test']), false);
+  assert.equal(isAllowedMethod('GET'), true);
+  assert.equal(isAllowedMethod('HEAD'), true);
+  assert.equal(isAllowedMethod('POST'), false);
+});
+
+test('malformed, contradictory, stale, and policy-invalid browser data is rejected', () => {
+  const now = new Date('2026-01-01T10:05:00.000Z');
+  assert.throws(() => validateExtractedCandidate(browserCandidate({ totalMinor: 1191 }), { now, allowlist: ['fixture.test'] }), /total/);
+  assert.throws(() => validateExtractedCandidate(browserCandidate({ expiresAt: '2026-01-01T09:59:00.000Z' }), { now, allowlist: ['fixture.test'] }), /stale/i);
+  assert.throws(() => validateExtractedCandidate(browserCandidate({ sourceUrl: 'https://other.test/item' }), { now, allowlist: ['fixture.test'] }), /approved/i);
+  assert.throws(() => normalizeCandidate(browserCandidate({ subtotalMinor: 1.5 }), { now, allowlist: ['fixture.test'] }), /integer/i);
+});
+
+test('browser adapter uses the worker result when enabled and falls back safely on worker failure', () => {
+  const fallback = new MockDiscoveryAdapter({ clock: () => new Date('2026-01-01T10:00:00.000Z') });
+  const candidate = browserCandidate({ observedAt: '2026-01-01T10:00:00.000Z', expiresAt: '2026-01-01T10:15:00.000Z' });
+  let workerInput;
+  const adapter = new PlaywrightDiscoveryAdapter({
+    enabled: true,
+    allowlist: ['fixture.test'],
+    startUrls: ['https://fixture.test/catalog'],
+    clock: () => new Date('2026-01-01T10:05:00.000Z'),
+    fallback,
+    workerRunner: (input) => { workerInput = input; return { discoveredAt: candidate.observedAt, candidates: [candidate] }; }
+  });
+  const result = adapter.discover({ request: { intent: parsePurchaseRequest('I want Logitech keyboard') } });
+  assert.equal(workerInput.limits.maxTabs, DEFAULT_LIMITS.maxTabs);
+  assert.equal(result.mode, 'read-only Playwright fixture');
+  assert.equal(result.candidates[0].merchantDomain, 'fixture.test');
+
+  const failed = new PlaywrightDiscoveryAdapter({
+    enabled: true,
+    allowlist: ['fixture.test'],
+    startUrls: ['https://fixture.test/catalog'],
+    fallback,
+    workerRunner: () => { throw new Error('timeout'); }
+  }).discover({ request: { intent: parsePurchaseRequest('I want Logitech keyboard') } });
+  assert.equal(failed.discoveryStatus.status, 'unavailable');
+  assert.equal(failed.discoveryStatus.code, 'DISCOVERY_UNAVAILABLE');
+  assert.match(failed.source, /MOCK FALLBACK/);
 });
 
 test('HTTP request-to-purchase flow uses persisted discovery and lifecycle routes', async () => {

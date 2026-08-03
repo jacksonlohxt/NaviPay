@@ -31,7 +31,7 @@ The customer and address are deliberately labeled simulated and are stored as re
 
 ## Local fake environments
 
-- **Merchant catalog**: `CATALOG` in `src/sandbox.js` contains merchant IDs, local merchant domains, SKUs, variant IDs, prices, tax and shipping, quantities, and product categories for keyboards, mice, and earphones.
+- **Merchant catalog**: `CATALOG` in `src/sandbox.js` contains merchant IDs, local merchant domains, SKUs, variant IDs, prices, tax and shipping, quantities, and product categories for keyboards, mice, and earphones. It remains the reliable default and test oracle.
 - **Inventory**: `LocalInventoryAdapter` supports one-unit stock leases with expiry, reserve, commit, release, out-of-stock handling, and idempotent operation references. Reservation happens before any wallet debit.
 - **Wallet**: `LocalWalletTransferAdapter` operates on the seeded wallet and writes an atomic double-entry ledger. A transfer has a wallet debit and merchant credit leg, a stable operation reference, replay lookup, insufficient-funds handling, decline handling, unknown-result handling, and compensation support. The wallet balance is the spendable source. It is not inferred from chain evidence.
 - **Merchant credit**: `LocalMerchantCreditAdapter` confirms that the ledger credit reached the selected merchant before order creation.
@@ -39,6 +39,24 @@ The customer and address are deliberately labeled simulated and are stored as re
 - **Fulfillment and delivery**: `LocalFulfillmentAdapter` and `LocalDeliveryAdapter` write independent statuses. A delivery failure leaves the confirmed payment, merchant credit, order, and receipt confirmed.
 
 All adapter responses are normalized server-side. The browser receives status, references, and safe evidence only, never raw provider payloads or credentials.
+
+## Optional local browser discovery prototype
+
+The default is still the seeded catalog. The bounded Playwright experiment is opt-in and only accepts local hosts or exact domains listed in `NAVIPAY_DISCOVERY_ALLOWLIST`:
+
+```sh
+# Serve replay-only fixture pages from this repository in another terminal.
+python3 -m http.server 43123 --directory fixtures
+
+NAVIPAY_PLAYWRIGHT_DISCOVERY=1 \
+NAVIPAY_DISCOVERY_ALLOWLIST=127.0.0.1 \
+NAVIPAY_DISCOVERY_URLS=http://127.0.0.1:43123/merchants/harbor-supply.html \
+npm start
+```
+
+The adapter runs in a separate worker process, permits only GET and HEAD requests, and enforces page, tab, redirect, response-size, candidate, and deadline limits. It sends no credentials, uses no proxy, performs no arbitrary page evaluation, and has no checkout, order, inventory, or payment capability. If Playwright is not installed, navigation is blocked, data is malformed or stale, a limit is exceeded, or the worker fails, NaviPay returns the stable `DISCOVERY_UNAVAILABLE` status and uses the explicitly labelled mock catalog fallback. Playwright is an optional local development tool and is not required for the default product or CI.
+
+Browser discovery is recommendation-only. Approved merchant APIs remain mandatory for the final quote, inventory authority, order creation, and payment authority. A fixture result can never reserve stock, authorize money, create an order, or invoke payment.
 
 ## API boundary
 

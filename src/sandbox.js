@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const { AdapterError } = require('./adapters');
+const { createConfiguredDiscoveryAdapter, PlaywrightDiscoveryAdapter } = require('./playwright-discovery');
 const { CURRENCY } = require('./domain');
 
 const SANDBOX_MODE = 'simulated local sandbox';
@@ -734,7 +735,10 @@ function safeCandidate(candidate) {
   return {
     id: candidate.id,
     merchant: candidate.merchant,
+    merchantDomain: candidate.merchantDomain,
     merchantId: candidate.merchantId,
+    sku: candidate.sku,
+    variantId: candidate.variantId,
     item: candidate.item,
     variant: candidate.variant,
     brand: candidate.brand,
@@ -749,10 +753,12 @@ function safeCandidate(candidate) {
     relevanceScore: candidate.relevanceScore,
     matchReasons: Array.isArray(candidate.matchReasons) ? [...candidate.matchReasons] : [],
     quoteExpiresAt: candidate.quoteExpiresAt,
+    sourceUrl: candidate.sourceUrl || candidate.evidence?.sourceUrl || null,
     evidence: candidate.evidence ? {
       type: candidate.evidence.type,
       source: candidate.evidence.source,
       observedAt: candidate.evidence.observedAt,
+      sourceUrl: candidate.evidence.sourceUrl || candidate.sourceUrl || null,
       note: candidate.evidence.note
     } : null
   };
@@ -821,6 +827,9 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
   const reservation = task.inventory?.reservation;
   const quote = task.quote ? {
     status: task.quote.locked ? 'locked' : 'open',
+    source: task.quote.source || null,
+    recommendationOnly: Boolean(task.quote.recommendationOnly),
+    discoveryStatus: task.quote.discoveryStatus || { status: 'available', code: null, message: null },
     merchantId: task.quote.merchantId || selected?.merchantId || null,
     merchant: task.quote.merchant || selected?.merchant || null,
     item: task.quote.item || selected?.item || null,
@@ -948,7 +957,8 @@ class NaviPaySandboxService {
     this.store = store;
     this.clock = clock;
     seedSandbox(store);
-    this.discoveryAdapter = adapters.discovery || new LocalDiscoveryAdapter({ clock });
+    const localDiscovery = new LocalDiscoveryAdapter({ clock });
+    this.discoveryAdapter = adapters.discovery || createConfiguredDiscoveryAdapter({ clock, fallback: localDiscovery, catalog: CATALOG });
     this.fundingAdapter = adapters.funding || new LocalFundingAdapter({ store, clock });
     this.inventoryAdapter = adapters.inventory || new LocalInventoryAdapter({ store, clock });
     this.walletAdapter = adapters.wallet || new LocalWalletTransferAdapter({ store, clock });
@@ -1302,6 +1312,8 @@ class NaviPaySandboxService {
           discoveredAt: result.discoveredAt,
           candidates: result.candidates,
           recommendedCandidateId: result.recommendedCandidateId,
+          recommendationOnly: Boolean(result.recommendationOnly),
+          discoveryStatus: result.discoveryStatus || { status: 'available', code: null, message: null },
           selectedCandidateId: null,
           locked: false,
           recommendation: null,
@@ -1315,9 +1327,24 @@ class NaviPaySandboxService {
       });
       this._complete(taskId, 'discovery', result, result.discoveredAt);
       this._recordStageAudit(taskId, 'discovery', 'discovery.completed', 'success', `Found ${result.candidates.length} simulated in-catalog candidates.`, result);
+      if (result.recommendationOnly) {
+        this._updateTask(taskId, (current) => {
+          current.recommendation = {
+            status: 'recommendation_only',
+            candidateId: result.recommendedCandidateId,
+            reason: 'Browser discovery is recommendation-only; an approved merchant API is required before quote, inventory, or payment authority.',
+            autoSelectable: false
+          };
+          current.quote.recommendation = current.recommendation;
+          current.state = 'awaiting_selection';
+          current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Use an approved merchant API to obtain the final quote before purchase.' };
+        });
+        return this._response(taskId);
+      }
     }
 
     task = this.getTask(taskId);
+    if (task.quote.recommendationOnly) return this._response(taskId);
     if (!task.recommendation) {
       const candidates = task.quote.candidates;
       const available = candidates.filter((candidate) => candidate.availability === 'in_stock' && candidate.totalMinor <= task.spendingCeilingMinor);
@@ -1583,6 +1610,7 @@ module.exports = {
   SandboxDomainError,
   NaviPaySandboxService,
   LocalDiscoveryAdapter,
+  PlaywrightDiscoveryAdapter,
   LocalFundingAdapter,
   LocalInventoryAdapter,
   LocalWalletTransferAdapter,
