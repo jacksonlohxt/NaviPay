@@ -1,4 +1,4 @@
-const state = { tasks: [], task: null, projection: null, discovery: null, wallet: null, ledger: [], audit: [], busy: false, error: null };
+const state = { tasks: [], task: null, projection: null, discovery: null, wallet: null, ledger: [], audit: [], busy: false, error: null, targetSite: '' };
 const app = document.querySelector('#app');
 
 function escapeHtml(value) {
@@ -76,7 +76,7 @@ function dataCell(label, value, note = '') {
 
 function failureMessage(task) {
   const code = task.failure?.code;
-  if (task.state === 'awaiting_selection') return task.quote?.recommendationOnly ? 'This browser result is a recommendation only. An approved merchant adapter must provide the authoritative quote before any purchase action.' : 'We found more than one good match. Choose the item you want in Advanced details to continue.';
+  if (task.state === 'awaiting_selection') return task.quote?.recommendationOnly ? 'A read-only browser result is ready. Select it in Advanced details so NaviPay can cross-check the authoritative local quote before purchase.' : 'We found more than one good match. Choose the item you want in Advanced details to continue.';
   if (task.state === 'reconciliation_required') return 'The payment result is unclear. Nothing will be tried again until you confirm what happened in Advanced details.';
   if (code === 'INSUFFICIENT_FUNDS') return 'There is not enough fake balance for this purchase. Nothing was charged.';
   if (code === 'OUT_OF_STOCK') return 'The requested item is out of stock. Nothing was charged.';
@@ -84,6 +84,10 @@ function failureMessage(task) {
   if (code === 'DELIVERY_FAILED') return 'The purchase is confirmed, but delivery could not be completed.';
   if (code === 'FULFILLMENT_FAILED') return 'The purchase is confirmed, but the order could not be prepared.';
   if (code === 'INVALID_PURCHASE_REQUEST') return 'Tell us what you would like to buy, such as “I want a keyboard”.';
+  if (code === 'DISCOVERY_DOMAIN_BLOCKED') return 'That target site is not approved. NaviPay did not fetch it and used the seeded local catalog instead.';
+  if (code === 'DISCOVERY_NO_MATCH') return 'The approved site had no matching item. NaviPay used the seeded local catalog instead.';
+  if (code === 'DISCOVERY_TIMEOUT') return 'The approved site took too long to answer. NaviPay used the seeded local catalog instead.';
+  if (code === 'INVALID_TARGET_SITE') return 'Enter an http or https target site URL without a username or password.';
   return 'We could not complete this purchase. No unconfirmed payment was left behind.';
 }
 
@@ -117,7 +121,9 @@ function outcome(task) {
 
 function requestCard() {
   const discovery = state.task ? discoveryView(state.task) : state.discovery || { label: 'Seeded catalog', explanation: 'NaviPay is using its seeded local merchant catalog.' };
-  return `<section class="request-card"><div class="request-copy"><span class="overline">NaviPay purchase</span><h1>What should we buy?</h1><p>Tell NaviPay what you need. It will find an item, pay from the fake wallet, and handle the order automatically.</p></div><form id="request-form" novalidate><label for="request-input">Your request</label><div class="request-row"><input id="request-input" name="request" type="text" maxlength="240" autocomplete="off" placeholder="I want an Apple Magic Keyboard" required><button type="submit" class="run-button"${state.busy ? ' disabled' : ''}>${state.busy ? 'Running…' : 'Run purchase'}</button></div><small>Try “I want an Apple Magic Keyboard”, “I want a mouse”, or “I want earphones”.</small><p class="discovery-config"><span>Discovery</span>${discoveryBadge(discovery)} ${escapeHtml(discovery.explanation)}</p><p class="form-error" id="request-error" role="alert" hidden></p></form></section>`;
+  const configuredSite = state.discovery?.configuredSite || { label: 'Seeded catalog is the default' };
+  const targetValue = escapeHtml(state.targetSite);
+  return `<section class="request-card"><div class="request-copy"><span class="overline">NaviPay purchase</span><h1>What should we buy?</h1><p>Give NaviPay a plain instruction and an approved commerce site. It will discover a match, then complete the local simulated purchase.</p></div><form id="request-form" novalidate><label for="request-input">Purchase instruction</label><div class="request-row"><input id="request-input" name="request" type="text" maxlength="240" autocomplete="off" placeholder="Find an Apple Magic Keyboard" required><button type="submit" class="run-button"${state.busy ? ' disabled' : ''}>${state.busy ? 'Running…' : 'Discover and purchase'}</button></div><label class="target-label" for="target-site">Target commerce site <span>(optional when configured)</span></label><input id="target-site" name="targetSite" type="url" maxlength="2048" autocomplete="url" value="${targetValue}" placeholder="http://127.0.0.1:43123/competition/"><small>Use the local replay fixture URL, or leave blank to use the configured challenge site. Unapproved sites are never fetched.</small><p class="configured-site"><span>Configured site</span><strong>${escapeHtml(configuredSite.label || 'Not configured')}</strong></p><p class="discovery-config"><span>Discovery status</span>${discoveryBadge(discovery)} ${escapeHtml(discovery.explanation)}</p><p class="form-error" id="request-error" role="alert" hidden></p></form></section>`;
 }
 
 function emptyState() {
@@ -141,7 +147,7 @@ function productSummary(task) {
   const stockNote = displayItem?.variant || (recommendation?.reason || 'NaviPay is looking for a suitable item.');
   const itemLabel = item ? 'Item found' : fallbackItem ? 'Requested item' : 'Item';
   const breakdown = view.quote && Number.isFinite(view.quote.totalMinor) ? `<div class="quote-breakdown" aria-label="Quote breakdown">${dataCell('Subtotal', formatMoney(view.quote.subtotalMinor, view.quote.currency))}${dataCell('Shipping', formatMoney(view.quote.shippingMinor, view.quote.currency))}${dataCell('Tax', formatMoney(view.quote.taxMinor, view.quote.currency))}${dataCell('Total', formatMoney(view.quote.totalMinor, view.quote.currency))}</div>` : '';
-  const rationale = view.recommendation?.reason || recommendation?.reason || 'NaviPay is looking for a suitable item.';
+  const rationale = displayItem?.matchReasons?.join('; ') || view.recommendation?.reason || recommendation?.reason || 'NaviPay is looking for a suitable item.';
   const receiptNote = view.receipt?.status === 'confirmed' ? `Receipt ${shortId(view.receipt.id)} is ready.` : '';
   const discovery = discoveryView(task);
   return `<section class="panel product-panel"><div class="panel-heading"><div><span class="overline">${escapeHtml(itemLabel)}</span><h2>${escapeHtml(itemName)}</h2></div>${discoveryBadge(discovery)}</div><div class="discovery-explanation"><strong>${escapeHtml(discovery.label || 'Discovery')}</strong><span>${escapeHtml(discovery.explanation || '')}</span></div><div class="product-highlight"><div><span class="product-label">Merchant</span><strong>${escapeHtml(merchant)}</strong><small>${escapeHtml(stockNote)}</small><small class="selection-reason">Why this item: ${escapeHtml(rationale)}</small></div><div class="product-amount"><span class="product-label">Amount spent</span><strong>${escapeHtml(amountSpent)}</strong><small>${escapeHtml(amountNote)}</small></div></div>${breakdown}${receiptNote ? `<p class="receipt-note">✓ ${escapeHtml(receiptNote)}</p>` : ''}</section>`;
@@ -203,12 +209,12 @@ function candidateDetails(task) {
   const quote = state.projection?.quote || task.quote;
   if (!quote?.candidates?.length) return '';
   const recommendationOnly = Boolean(quote.recommendationOnly);
-  const needsChoice = task.state === 'awaiting_selection' && !recommendationOnly;
+  const needsChoice = task.state === 'awaiting_selection';
   const selected = quote.candidates.find((candidate) => candidate.id === quote.selectedCandidateId) || quote.candidates.find((candidate) => candidate.id === quote.recommendedCandidateId);
   const selectedEvidence = selected && (selected.sourceUrl || selected.evidence?.observedAt || selected.matchReasons?.length) ? `<div class="selection-evidence"><h4>Selected item evidence</h4><dl class="detail-list">${detailValue('Source URL', selected.sourceUrl || 'Seeded catalog - no browser URL')}${detailValue('Observed', formatDate(selected.evidence?.observedAt))}${detailValue('Match rationale', (selected.matchReasons || []).join('; ') || 'No additional rationale recorded')}</dl></div>` : '';
-  const heading = recommendationOnly ? 'Recommended items' : needsChoice ? 'Choose an item' : 'Discovery details';
-  const help = recommendationOnly ? '<p class="advanced-help">This is a read-only browser recommendation. NaviPay will not reserve stock, authorize payment, or create an order from it.</p>' : needsChoice ? '<p class="advanced-help">Several items fit your request. Choose one to continue. This is the only decision NaviPay needs from you.</p>' : '';
-  return `<div class="advanced-block"><h3>${heading}</h3>${help}<div class="candidate-list">${quote.candidates.map((candidate) => `<div class="candidate-row ${candidate.id === quote.selectedCandidateId ? 'selected' : ''}"><div><strong>${escapeHtml(candidate.item)}</strong><span>${escapeHtml(candidate.merchant)} · ${escapeHtml(candidate.variant)}</span></div><div class="candidate-end"><strong>${formatMoney(candidate.totalMinor, candidate.currency)}</strong>${candidate.availability === 'in_stock' ? '<small>In stock</small>' : '<small>Out of stock</small>'}${needsChoice && candidate.availability === 'in_stock' ? `<button type="button" class="secondary-button" data-candidate-id="${escapeHtml(candidate.id)}">Choose</button>` : ''}</div></div>`).join('')}</div>${selectedEvidence}</div>`;
+  const heading = recommendationOnly && needsChoice ? 'Select a discovery result' : needsChoice ? 'Choose an item' : 'Discovery details';
+  const help = recommendationOnly && needsChoice ? '<p class="advanced-help">Browser discovery is read-only. Select a result to cross-check it against the approved local quote before any stock or payment action.</p>' : needsChoice ? '<p class="advanced-help">Several items fit your request. Choose one to continue. This is the only decision NaviPay needs from you.</p>' : recommendationOnly ? '<p class="advanced-help">This browser result is read-only evidence. It cannot authorize money or inventory.</p>' : '';
+  return `<div class="advanced-block"><h3>${heading}</h3>${help}<div class="candidate-list">${quote.candidates.map((candidate) => `<div class="candidate-row ${candidate.id === quote.selectedCandidateId ? 'selected' : ''}"><div><strong>${escapeHtml(candidate.item)}</strong><span>${escapeHtml(candidate.merchant)} · ${escapeHtml(candidate.variant)}</span></div><div class="candidate-end"><strong>${formatMoney(candidate.totalMinor, candidate.currency)}</strong>${candidate.availability === 'in_stock' ? '<small>In stock</small>' : '<small>Out of stock</small>'}${needsChoice && candidate.availability === 'in_stock' ? `<button type="button" class="secondary-button" data-candidate-id="${escapeHtml(candidate.id)}">Select for purchase</button>` : ''}</div></div>`).join('')}</div>${selectedEvidence}</div>`;
 }
 
 function ledgerDetails(task) {
@@ -292,6 +298,7 @@ async function runPurchase(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const request = form.elements.request.value.trim();
+  const targetSite = form.elements.targetSite.value.trim();
   const errorNode = document.querySelector('#request-error');
   if (!request) {
     errorNode.textContent = 'Enter a plain-language request first.';
@@ -301,13 +308,14 @@ async function runPurchase(event) {
   }
   state.busy = true;
   state.error = null;
+  state.targetSite = targetSite;
   render();
   try {
-    const payload = await api('/api/purchases/run', { method: 'POST', headers: { 'Idempotency-Key': runKey() }, body: JSON.stringify({ request }) });
+    const payload = await api('/api/purchases/run', { method: 'POST', headers: { 'Idempotency-Key': runKey() }, body: JSON.stringify({ request, ...(targetSite ? { targetSite } : {}) }) });
     state.task = payload.task;
     state.projection = payload.projection || state.projection;
     await refresh();
-    form.reset();
+    form.elements.request.value = '';
   } catch (error) {
     if (error.payload?.task) {
       state.task = error.payload.task;
@@ -367,6 +375,7 @@ async function selectTask(taskId) {
     const payload = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
     state.task = payload.task;
     state.projection = payload.projection || state.projection;
+    state.targetSite = payload.task.targetSite?.url || state.targetSite;
     await loadAudit(taskId);
     await refresh();
   } catch (error) {
@@ -392,6 +401,7 @@ async function boot() {
     state.wallet = payload.wallet || null;
     state.discovery = payload.discovery || null;
     state.task = state.tasks[0] || null;
+    state.targetSite = state.task?.targetSite?.url || '';
     state.projection = (payload.projections || []).find((view) => view.taskId === state.task?.id) || null;
     if (state.task) {
       await loadAudit(state.task.id);

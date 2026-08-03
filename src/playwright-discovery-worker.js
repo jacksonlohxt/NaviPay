@@ -1,5 +1,5 @@
 const fs = require('node:fs');
-const { isApprovedUrl, ALLOWED_METHODS, DEFAULT_LIMITS, extractCandidatesFromHtml } = require('./playwright-discovery');
+const { isApprovedUrl, isExplicitlyAllowlistedUrl, ALLOWED_METHODS, DEFAULT_LIMITS, extractCandidatesFromHtml } = require('./playwright-discovery');
 
 function policyError(code, message) {
   const error = new Error(message);
@@ -29,8 +29,8 @@ async function discoverWithPlaywright(input) {
   const startedAt = Date.now();
   const deadline = startedAt + limits.deadlineMs;
   const approvedUrls = input.startUrls || [];
-  if (approvedUrls.length > limits.maxPages || approvedUrls.some((url) => !isApprovedUrl(url, allowlist))) {
-    throw policyError('DISCOVERY_POLICY_VIOLATION', 'A discovery URL is not approved.');
+  if (!Array.isArray(allowlist) || !allowlist.length || approvedUrls.length > limits.maxPages || approvedUrls.some((url) => !isExplicitlyAllowlistedUrl(url, allowlist))) {
+    throw policyError('DISCOVERY_POLICY_VIOLATION', 'A discovery URL is not explicitly approved.');
   }
 
   let browser;
@@ -50,8 +50,14 @@ async function discoverWithPlaywright(input) {
         await route.abort('blockedbyclient');
         return;
       }
-      if (!isApprovedUrl(request.url(), allowlist)) {
+      if (!isApprovedUrl(request.url(), allowlist) || !isExplicitlyAllowlistedUrl(request.url(), allowlist)) {
         policyViolation = policyError('DISCOVERY_DOMAIN_BLOCKED', 'Navigation escaped the approved discovery domains.');
+        await route.abort('blockedbyclient');
+        return;
+      }
+      const headers = request.headers();
+      if (headers.authorization || headers.cookie || headers['proxy-authorization']) {
+        policyViolation = policyError('DISCOVERY_CREDENTIALS_BLOCKED', 'Discovery never sends credentials to a merchant site.');
         await route.abort('blockedbyclient');
         return;
       }
@@ -75,13 +81,14 @@ async function discoverWithPlaywright(input) {
       if (context.pages().length > limits.maxTabs) throw policyError('DISCOVERY_TAB_LIMIT', 'The discovery tab limit was exceeded.');
       const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: Math.max(1, deadline - Date.now()) });
       if (policyViolation) throw policyViolation;
-      if (!response || !isApprovedUrl(response.url(), allowlist)) throw policyError('DISCOVERY_DOMAIN_BLOCKED', 'Navigation escaped the approved discovery domains.');
+      if (!response || !isApprovedUrl(response.url(), allowlist) || !isExplicitlyAllowlistedUrl(response.url(), allowlist)) throw policyError('DISCOVERY_DOMAIN_BLOCKED', 'Navigation escaped the approved discovery domains.');
       if (redirectCount(response.request()) > limits.maxRedirects) throw policyError('DISCOVERY_REDIRECT_LIMIT', 'The discovery redirect limit was exceeded.');
       const declaredLength = Number(response.headers()['content-length'] || 0);
       if (declaredLength > limits.maxResponseBytes) throw policyError('DISCOVERY_RESPONSE_TOO_LARGE', 'The merchant fixture response exceeded the response-size limit.');
       const body = await response.body();
+      if (Date.now() >= deadline) throw policyError('DISCOVERY_TIMEOUT', 'The discovery deadline was exceeded.');
       responseBytes += body.length;
-      if (body.length > limits.maxResponseBytes || responseBytes > limits.maxResponseBytes * limits.maxPages) throw policyError('DISCOVERY_RESPONSE_TOO_LARGE', 'The merchant fixture response exceeded the response-size limit.');
+      if (body.length > limits.maxResponseBytes || responseBytes > limits.maxResponseBytes) throw policyError('DISCOVERY_RESPONSE_TOO_LARGE', 'The merchant fixture response exceeded the response-size limit.');
       const pageCandidates = extractCandidatesFromHtml(body.toString('utf8'), response.url(), { now: new Date(), allowlist, replayClock: true });
       candidates.push(...pageCandidates);
       if (candidates.length > limits.maxCandidates) throw policyError('DISCOVERY_PAGE_LIMIT', 'The discovery candidate limit was exceeded.');

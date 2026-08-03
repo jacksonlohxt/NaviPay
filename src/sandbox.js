@@ -1,6 +1,6 @@
 const crypto = require('node:crypto');
 const { AdapterError } = require('./adapters');
-const { createConfiguredDiscoveryAdapter, DISCOVERY_SOURCE, PlaywrightDiscoveryAdapter, isApprovedUrl } = require('./playwright-discovery');
+const { createConfiguredDiscoveryAdapter, DISCOVERY_SOURCE, PlaywrightDiscoveryAdapter, isExplicitlyAllowlistedUrl, normalizeTargetUrl } = require('./playwright-discovery');
 const { CURRENCY } = require('./domain');
 
 const SANDBOX_MODE = 'simulated local sandbox';
@@ -751,7 +751,7 @@ function safeCandidate(candidate, { sourceAllowlist = [] } = {}) {
   let safeSourceUrl = null;
   if (candidate.sourceUrl || candidate.evidence?.sourceUrl) {
     const value = candidate.sourceUrl || candidate.evidence.sourceUrl;
-    if (isApprovedUrl(value, sourceAllowlist)) safeSourceUrl = new URL(value).toString();
+    if (isExplicitlyAllowlistedUrl(value, sourceAllowlist)) safeSourceUrl = new URL(value).toString();
   }
   return {
     id: candidate.id,
@@ -771,7 +771,9 @@ function safeCandidate(candidate, { sourceAllowlist = [] } = {}) {
     currency: candidate.currency,
     availability: candidate.availability,
     stockQuantity: candidate.stockQuantity,
+    observedAt: candidate.observedAt || candidate.evidence?.observedAt || null,
     relevanceScore: candidate.relevanceScore,
+    confidence: candidate.confidence ?? null,
     matchReasons: Array.isArray(candidate.matchReasons) ? [...candidate.matchReasons] : [],
     quoteExpiresAt: candidate.quoteExpiresAt,
     sourceUrl: safeSourceUrl,
@@ -852,12 +854,15 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
     status: discoveryUnavailable ? 'unavailable' : browserDiscovery ? 'available' : 'available',
     label: discoveryUnavailable ? 'Seeded catalog fallback' : browserDiscovery ? 'Local browser fixture' : 'Seeded catalog',
     explanation: discoveryUnavailable
-      ? 'Browser discovery was unavailable, so NaviPay used its seeded local catalog instead.'
+      ? `${task.quote.discoveryStatus?.message || 'Browser discovery was unavailable.'} NaviPay used its seeded local catalog instead.`
       : browserDiscovery
-        ? 'A read-only local browser fixture recommended this item. It cannot provide the authoritative quote, inventory, or payment.'
+        ? task.quote.recommendationOnly
+          ? 'A read-only local browser fixture recommended this item. Select it to cross-check the authoritative quote before purchase.'
+          : 'Read-only browser evidence was selected and matched to the authoritative local quote before purchase.'
         : 'NaviPay matched this request against its seeded local merchant catalog.',
     recommendationOnly: Boolean(task.quote.recommendationOnly),
-    fallback: discoveryUnavailable ? 'seeded_catalog' : null
+    fallback: discoveryUnavailable ? 'seeded_catalog' : null,
+    targetSite: task.targetSite ? { status: task.targetSite.status } : { status: 'not_requested' }
   } : null;
   const reservation = task.inventory?.reservation;
   const quote = task.quote ? {
@@ -994,6 +999,7 @@ class NaviPaySandboxService {
     this.clock = clock;
     seedSandbox(store);
     const localDiscovery = new LocalDiscoveryAdapter({ clock });
+    this.localDiscoveryAdapter = localDiscovery;
     this.discoveryAdapter = adapters.discovery || createConfiguredDiscoveryAdapter({ clock, fallback: localDiscovery, catalog: CATALOG });
     this.fundingAdapter = adapters.funding || new LocalFundingAdapter({ store, clock });
     this.inventoryAdapter = adapters.inventory || new LocalInventoryAdapter({ store, clock });
@@ -1103,8 +1109,21 @@ class NaviPaySandboxService {
     return { statusCode, body: { task, projection, discovery: this.getDiscoveryProjection(), run: { status: runStatus, nextAction: task.automation.nextAction, automatic: task.automation.automatic }, replayed } };
   }
 
-  createTask({ request, scenario = 'happy', origin = 'operator', replayOf = null } = {}) {
+  _targetSiteRecord(targetSite) {
+    if (targetSite === undefined || targetSite === null || (typeof targetSite === 'string' && !targetSite.trim())) return null;
+    let url;
+    try {
+      url = normalizeTargetUrl(targetSite);
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'INVALID_TARGET_SITE', error.message);
+    }
+    const approved = isExplicitlyAllowlistedUrl(url, this.discoveryAdapter.allowlist || []);
+    return { status: approved ? 'approved' : 'blocked', url: approved ? url : null };
+  }
+
+  createTask({ request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator', replayOf = null } = {}) {
     if (!SANDBOX_SCENARIOS.has(scenario)) throw new SandboxDomainError(400, 'INVALID_SCENARIO', `Unknown sandbox scenario: ${scenario}.`);
+    const targetSiteRecord = this._targetSiteRecord(targetSite === undefined ? targetUrl : targetSite);
     let raw;
     let intent;
     try {
@@ -1125,6 +1144,7 @@ class NaviPaySandboxService {
       currency: CURRENCY,
       spendingCeilingMinor: TASK_CEILING_MINOR,
       customer: clone(DEMO_CUSTOMER),
+      targetSite: targetSiteRecord,
       walletId: DEMO_WALLET.id,
       request: { raw, intent },
       state: 'created',
@@ -1225,6 +1245,18 @@ class NaviPaySandboxService {
       const stock = this.store.data.inventory[inventoryKey(entry)];
       return { merchantId: entry.merchantId, merchant: entry.merchant, sku: entry.sku, variantId: entry.variantId, brand: entry.brand, productCategory: entry.productCategory, item: entry.item, variant: entry.variant, totalMinor: entry.priceMinor + entry.shippingMinor + entry.taxMinor, currency: CURRENCY, availableQuantity: stock?.availableQuantity || 0, mode: SANDBOX_MODE };
     });
+  }
+
+  _blockedTargetFallback(task) {
+    const local = this.localDiscoveryAdapter.discover({ request: task.request, scenario: task.scenario === 'discovery-failure' ? 'happy' : task.scenario });
+    const source = 'NaviPay seeded merchant sandbox (MOCK FALLBACK - discovery unavailable)';
+    return {
+      ...local,
+      mode: SANDBOX_MODE,
+      source,
+      discoveryStatus: { status: 'unavailable', code: 'DISCOVERY_DOMAIN_BLOCKED', message: 'That target site is not on NaviPay\'s approved discovery allowlist.' },
+      candidates: local.candidates.map((candidate) => ({ ...candidate, evidence: { ...candidate.evidence, source, note: 'MOCK FALLBACK fixture; the blocked target site was never fetched.' } }))
+    };
   }
 
   _recordStageAudit(taskId, stageName, type, status, summary, result) {
@@ -1334,6 +1366,21 @@ class NaviPaySandboxService {
     return this._response(taskId);
   }
 
+  _authoritativeCandidate(task, discoveredCandidate) {
+    const authoritative = this.localDiscoveryAdapter.discover({ request: task.request, scenario: task.scenario });
+    const match = authoritative.candidates.find((candidate) => candidate.merchantId === discoveredCandidate.merchantId && candidate.sku === discoveredCandidate.sku && candidate.variantId === discoveredCandidate.variantId);
+    if (!match) return null;
+    return {
+      ...match,
+      id: discoveredCandidate.id,
+      sourceUrl: discoveredCandidate.sourceUrl,
+      evidence: discoveredCandidate.evidence,
+      matchReasons: discoveredCandidate.matchReasons,
+      relevanceScore: discoveredCandidate.relevanceScore,
+      confidence: discoveredCandidate.confidence
+    };
+  }
+
   runTask(taskId, { candidateId = null, automatic = true } = {}) {
     let task = this.getTask(taskId);
     if (['completed', 'failed', 'reconciliation_required'].includes(task.state)) return this._response(taskId);
@@ -1352,7 +1399,9 @@ class NaviPaySandboxService {
       const opId = this._begin(taskId, 'discovery');
       let result;
       try {
-        result = this.discoveryAdapter.discover({ operationId: opId, taskId, request: task.request, scenario: task.scenario });
+        result = task.targetSite?.status === 'blocked'
+          ? this._blockedTargetFallback(task)
+          : this.discoveryAdapter.discover({ operationId: opId, taskId, request: task.request, scenario: task.scenario, targetSite: task.targetSite?.url || null, targetSiteBlocked: false });
       } catch (error) {
         this._fail(taskId, 'discovery', error.code || 'DISCOVERY_FAILED', error.message || 'The local merchant sandbox could not be searched.');
         return this._response(taskId, 502);
@@ -1384,19 +1433,48 @@ class NaviPaySandboxService {
           current.recommendation = {
             status: 'recommendation_only',
             candidateId: result.recommendedCandidateId,
-            reason: 'Browser discovery is recommendation-only; an approved merchant API is required before quote, inventory, or payment authority.',
+            reason: 'Browser discovery is recommendation-only; select a result to cross-check it against the approved local quote before purchase safeguards run.',
             autoSelectable: false
           };
           current.quote.recommendation = current.recommendation;
           current.state = 'awaiting_selection';
-          current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Use an approved merchant API to obtain the final quote before purchase.' };
+          current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Select a browser result to cross-check the approved local quote before purchase.' };
         });
         return this._response(taskId);
       }
     }
 
     task = this.getTask(taskId);
-    if (task.quote.recommendationOnly) return this._response(taskId);
+    if (task.quote.recommendationOnly) {
+      if (!candidateId) return this._response(taskId);
+      const discoveredCandidate = task.quote.candidates.find((candidate) => candidate.id === candidateId);
+      if (!discoveredCandidate) {
+        this._fail(taskId, 'quote', 'QUOTE_CANDIDATE_NOT_FOUND', 'The selected discovery candidate does not exist.');
+        return this._response(taskId, 422);
+      }
+      let authoritativeCandidate;
+      try {
+        authoritativeCandidate = this._authoritativeCandidate(task, discoveredCandidate);
+      } catch (error) {
+        this._fail(taskId, 'quote', error.code || 'AUTHORITATIVE_QUOTE_UNAVAILABLE', error.message || 'The selected item could not be matched to an approved local merchant quote.');
+        return this._response(taskId, 502);
+      }
+      if (!authoritativeCandidate) {
+        this._fail(taskId, 'quote', 'AUTHORITATIVE_QUOTE_UNAVAILABLE', 'The selected browser result is not present in the approved local merchant catalog, so no purchase was attempted.');
+        return this._response(taskId, 502);
+      }
+      this._updateTask(taskId, (current) => {
+        const recommendation = {
+          status: authoritativeCandidate.availability === 'in_stock' ? 'clear' : 'unavailable',
+          candidateId: authoritativeCandidate.id,
+          reason: 'Selected browser evidence was matched to the approved local catalog before quote, inventory, and payment.',
+          autoSelectable: authoritativeCandidate.availability === 'in_stock'
+        };
+        current.quote = { ...current.quote, candidates: current.quote.candidates.map((candidate) => candidate.id === authoritativeCandidate.id ? authoritativeCandidate : candidate), recommendationOnly: false, recommendation, authoritativeSource: 'seeded_catalog' };
+        current.recommendation = recommendation;
+      });
+      task = this.getTask(taskId);
+    }
     if (!task.recommendation) {
       const candidates = task.quote.candidates;
       const available = candidates.filter((candidate) => candidate.availability === 'in_stock' && candidate.totalMinor <= task.spendingCeilingMinor);
@@ -1554,13 +1632,15 @@ class NaviPaySandboxService {
     return previous;
   }
 
-  startPurchase({ idempotencyKey, request, scenario = 'happy', origin = 'operator' } = {}) {
+  startPurchase({ idempotencyKey, request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator' } = {}) {
     if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) throw new SandboxDomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key for the purchase run.');
-    const fingerprint = JSON.stringify({ request, scenario, origin });
+    const requestedTargetSite = targetSite === undefined ? targetUrl : targetSite;
+    const fingerprint = JSON.stringify({ request, targetSite: requestedTargetSite, scenario, origin });
+    const taskInput = { request, targetSite: requestedTargetSite, scenario, origin };
     const key = `sandbox:start:${idempotencyKey}`;
     const previous = this._readIdempotency(key, fingerprint);
     if (previous?.response) return { ...clone(previous.response), replayed: true };
-    const task = previous?.taskId ? this.getTask(previous.taskId) : this.createTask({ request, scenario, origin });
+    const task = previous?.taskId ? this.getTask(previous.taskId) : this.createTask(taskInput);
     if (!previous) this.store.transaction((data) => { data.idempotency[key] = { taskId: task.id, requestFingerprint: fingerprint, createdAt: now(this.clock), response: null }; });
     const result = this.runTask(task.id);
     const response = { ...result, statusCode: previous ? result.statusCode : (result.statusCode === 200 ? 201 : result.statusCode), replayed: false };

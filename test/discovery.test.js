@@ -20,6 +20,7 @@ const {
   extractCandidatesFromHtml,
   isAllowedMethod,
   isApprovedUrl,
+  isExplicitlyAllowlistedUrl,
   normalizeCandidate,
   validateExtractedCandidate
 } = require('../src/playwright-discovery');
@@ -215,6 +216,130 @@ test('sandbox projection reports browser success and exposes only safe selected 
   assert.doesNotMatch(JSON.stringify(result.body.projection), /workerRunner|credentials|password|rawPayload/i);
 });
 
+test('target-site discovery selects each competition replay product before the existing purchase lifecycle', () => {
+  const clock = () => new Date('2026-01-01T10:05:00.000Z');
+  const replayCandidates = extractCandidatesFromHtml(
+    fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'competition-site', 'index.html'), 'utf8'),
+    'https://fixture.test/competition-site/',
+    { now: clock(), replayClock: true, allowlist: ['fixture.test'] }
+  );
+  for (const [request, expectedItem] of [
+    ['Find an Apple Magic Keyboard', 'Apple Magic Keyboard'],
+    ['Find a Logitech MX Master 3S', 'Logitech MX Master 3S'],
+    ['Find Apple AirPods 4', 'Apple AirPods 4']
+  ]) {
+    const fallback = new LocalDiscoveryAdapter({ clock });
+    let workerInput;
+    const discovery = new PlaywrightDiscoveryAdapter({
+      enabled: true,
+      allowlist: ['fixture.test'],
+      startUrls: ['https://fixture.test/competition-site/'],
+      clock,
+      fallback,
+      workerRunner: (input) => {
+        workerInput = input;
+        return { discoveredAt: clock().toISOString(), candidates: replayCandidates };
+      }
+    });
+    const service = new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery } });
+    const discovered = service.startPurchase({ idempotencyKey: `competition-${expectedItem}`, request, targetSite: 'https://fixture.test/competition-site/' });
+    assert.equal(workerInput.startUrls[0], 'https://fixture.test/competition-site/');
+    assert.equal(discovered.body.task.state, 'awaiting_selection');
+    const candidate = discovered.body.task.quote.candidates.find((item) => item.item === expectedItem);
+    assert.ok(candidate, expectedItem);
+    assert.equal(discovered.body.projection.discovery.source, 'local_browser_fixture');
+    assert.equal(discovered.body.projection.quote.recommendationOnly, true);
+    const completed = service.resumePurchase(discovered.body.task.id, `select-${expectedItem}`, candidate.id);
+    assert.equal(completed.body.task.state, 'completed');
+    assert.equal(completed.body.task.quote.item, expectedItem);
+    assert.equal(completed.body.task.inventory.reservation.status, 'committed');
+    assert.equal(completed.body.task.payment.status, 'authorized');
+    assert.equal(completed.body.task.order.status, 'confirmed');
+    assert.equal(completed.body.task.delivery.status, 'delivered');
+    assert.equal(completed.body.task.receipt.status, 'confirmed');
+    assert.equal(completed.body.projection.quote.recommendationOnly, false);
+    const projectedCandidate = completed.body.projection.quote.candidates.find((item) => item.id === candidate.id);
+    assert.equal(projectedCandidate.sourceUrl, 'https://fixture.test/competition-site/');
+    assert.equal(projectedCandidate.observedAt, candidate.observedAt);
+    assert.equal(projectedCandidate.confidence > 0, true);
+    assert.equal(projectedCandidate.matchReasons.length > 0, true);
+  }
+});
+
+test('HTTP target-site discovery resumes into the same purchase safeguards', async () => {
+  const clock = () => new Date('2026-01-01T10:05:00.000Z');
+  const candidate = browserCandidate({
+    merchantId: 'merchant-orchard-electronics',
+    merchant: 'Orchard Electronics',
+    merchantDomain: 'fixture.test',
+    sku: 'sku-apple-magic-keyboard',
+    variantId: 'variant-usb-c-rechargeable',
+    brand: 'Apple',
+    productCategory: 'keyboards',
+    item: 'Apple Magic Keyboard',
+    variant: 'Wireless keyboard with USB-C charging',
+    sourceUrl: 'https://fixture.test/competition-site/'
+  });
+  const fallback = new LocalDiscoveryAdapter({ clock });
+  const discovery = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/competition-site/'], clock, fallback, workerRunner: () => ({ discoveredAt: candidate.observedAt, candidates: [candidate] }) });
+  const server = createServer({ service: new NaviPaySandboxService({ store: new MemoryStore(), clock, adapters: { discovery } }) });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  async function post(route, body, key) {
+    const response = await fetch(`${base}${route}`, { method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });
+    return { status: response.status, payload: await response.json() };
+  }
+  try {
+    const discovered = await post('/api/purchases/run', { request: 'Find an Apple Magic Keyboard', targetSite: 'https://fixture.test/competition-site/' }, 'http-target-discovery');
+    assert.equal(discovered.status, 201);
+    assert.equal(discovered.payload.task.state, 'awaiting_selection');
+    const selected = discovered.payload.task.quote.candidates[0];
+    const completed = await post(`/api/tasks/${discovered.payload.task.id}/run`, { candidateId: selected.id }, 'http-target-selection');
+    assert.equal(completed.status, 200);
+    assert.equal(completed.payload.task.state, 'completed');
+    assert.equal(completed.payload.task.receipt.item, 'Apple Magic Keyboard');
+    assert.equal(completed.payload.task.inventory.reservation.status, 'committed');
+    assert.equal(completed.payload.task.payment.status, 'authorized');
+    assert.equal(completed.payload.task.delivery.status, 'delivered');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('target-site policy rejects malformed URLs and falls back without fetching blocked hosts', () => {
+  assert.equal(isExplicitlyAllowlistedUrl('https://fixture.test/catalog', ['fixture.test']), true);
+  assert.equal(isExplicitlyAllowlistedUrl('http://127.0.0.1:43123/catalog', []), false);
+  const service = new NaviPaySandboxService({ store: new MemoryStore(), clock: () => new Date('2026-01-01T10:00:00.000Z') });
+  const blocked = service.startPurchase({ idempotencyKey: 'blocked-target', request: 'Find an Apple Magic Keyboard', targetSite: 'https://not-approved.example/catalog' });
+  assert.equal(blocked.body.task.targetSite.status, 'blocked');
+  assert.equal(blocked.body.task.targetSite.url, null);
+  assert.equal(blocked.body.projection.discovery.source, 'seeded_catalog_fallback');
+  assert.equal(blocked.body.projection.quote.discoveryStatus.code, 'DISCOVERY_DOMAIN_BLOCKED');
+  assert.doesNotMatch(JSON.stringify(blocked.body.projection), /not-approved\.example/);
+  assert.throws(() => service.startPurchase({ idempotencyKey: 'malformed-target', request: 'Find a mouse', targetSite: 'javascript:alert(1)' }), (error) => error.code === 'INVALID_TARGET_SITE');
+});
+
+test('stale, malformed, no-match, timeout, and worker failures all preserve the labelled local fallback', () => {
+  const fallback = new LocalDiscoveryAdapter({ clock: () => new Date('2026-01-01T10:05:00.000Z') });
+  const base = browserCandidate({ observedAt: '2026-01-01T10:00:00.000Z', expiresAt: '2026-01-01T10:15:00.000Z' });
+  const cases = [
+    { code: 'STALE_DISCOVERY_DATA', workerRunner: () => ({ candidates: [base] }), clock: () => new Date('2026-01-01T10:20:00.000Z') },
+    { code: 'CONTRADICTORY_DISCOVERY_DATA', workerRunner: () => ({ candidates: [{ ...base, totalMinor: 1 }] }) },
+    { code: 'DISCOVERY_NO_MATCH', workerRunner: () => ({ candidates: [{ ...base, brand: 'Unrelated', productCategory: 'mice', item: 'Unrelated Device', variant: 'Standard', sku: 'sku-unrelated' }] }) },
+    { code: 'DISCOVERY_TIMEOUT', workerRunner: () => { throw Object.assign(new Error('private timeout detail'), { code: 'DISCOVERY_TIMEOUT' }); } },
+    { code: 'DISCOVERY_UNAVAILABLE', workerRunner: () => { throw new Error('private worker detail'); } }
+  ];
+  for (const scenario of cases) {
+    const adapter = new PlaywrightDiscoveryAdapter({ enabled: true, allowlist: ['fixture.test'], startUrls: ['https://fixture.test/catalog'], clock: scenario.clock || (() => new Date('2026-01-01T10:05:00.000Z')), fallback, workerRunner: scenario.workerRunner });
+    const result = adapter.discover({ request: { intent: parsePurchaseRequest('I want a Logitech keyboard') } });
+    assert.equal(result.discoveryStatus.status, 'unavailable');
+    assert.equal(result.discoveryStatus.code, scenario.code);
+    assert.equal(result.candidates[0].evidence.source.includes('MOCK FALLBACK'), true);
+    assert.equal(result.candidates[0].sourceUrl, undefined);
+    assert.match(result.discoveryStatus.message, /site|worker|catalog|data|deadline/i);
+  }
+});
+
 test('sandbox reports unavailable browser discovery while safely using the seeded fallback', () => {
   const clock = () => new Date('2026-01-01T10:05:00.000Z');
   const fallback = new LocalDiscoveryAdapter({ clock });
@@ -246,6 +371,8 @@ test('frontend uses the safe discovery projection for badges and advanced eviden
   assert.match(frontend, /Observed/);
   assert.match(frontend, /Match rationale/);
   assert.match(frontend, /recommendationOnly/);
+  assert.match(frontend, /target-site/);
+  assert.match(frontend, /Configured site/);
 });
 
 test('HTTP request-to-purchase flow uses persisted discovery and lifecycle routes', async () => {

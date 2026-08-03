@@ -56,12 +56,19 @@ button:disabled { cursor: wait; opacity: .62; }
 .request-card .overline { color: var(--lime); }
 #request-form { padding: 1rem; border: 1px solid rgba(255,255,255,.14); border-radius: 17px; background: rgba(255,255,255,.07); }
 #request-form label { display: block; margin-bottom: .4rem; color: #d5e4db; font-size: .76rem; font-weight: 850; }
+#request-form label span { color: #91b3a4; font-size: .66rem; font-weight: 650; }
 .request-row { display: flex; gap: .55rem; }
 .request-row input { min-width: 0; flex: 1; min-height: 47px; padding: .7rem .8rem; border: 1px solid rgba(255,255,255,.2); border-radius: 11px; outline: none; background: #fffef9; color: var(--ink); font-size: .88rem; }
 .request-row input:focus { border-color: var(--lime); box-shadow: 0 0 0 3px rgba(189,244,119,.2); }
 .run-button { min-height: 47px; padding: .7rem 1.1rem; border: 0; border-radius: 11px; background: var(--lime); color: var(--ink); font-weight: 950; white-space: nowrap; }
 .run-button:hover:not(:disabled) { background: #d2fb96; transform: translateY(-1px); }
 #request-form > small { display: block; margin-top: .55rem; color: #abc6b8; font-size: .68rem; }
+#target-site { display: block; width: 100%; min-height: 42px; padding: .6rem .75rem; border: 1px solid rgba(255,255,255,.2); border-radius: 10px; outline: none; background: #fffef9; color: var(--ink); font-size: .8rem; }
+#target-site:focus { border-color: var(--lime); box-shadow: 0 0 0 3px rgba(189,244,119,.2); }
+.target-label { margin-top: .9rem !important; }
+.configured-site { display: flex; align-items: baseline; flex-wrap: wrap; gap: .35rem; margin: .7rem 0 0 !important; color: #abc6b8; font-size: .68rem !important; }
+.configured-site span { color: #d5e4db; font-weight: 850; }
+.configured-site strong { color: #e0eee6; font-weight: 750; }
 .form-error { margin: .55rem 0 0 !important; color: var(--coral) !important; font-size: .74rem !important; font-weight: 750; }
 
 .empty-start { max-width: 620px; margin: clamp(3rem, 10vw, 7rem) auto; text-align: center; }

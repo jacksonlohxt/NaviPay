@@ -75,7 +75,7 @@ function routeSandboxApi(service, req, res, url) {
     return readBody(req).then((body) => {
       const input = body || {};
       if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_TASK_REQUEST', 'Task request must be a JSON object.');
-      const task = service.createTask({ request: input.request, scenario: input.scenario || 'happy' });
+      const task = service.createTask({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy' });
       return json(res, 201, { task, projection: service.getTaskProjection(task.id) });
     });
   }
@@ -83,8 +83,8 @@ function routeSandboxApi(service, req, res, url) {
     return readBody(req).then((body) => {
       const input = body || {};
       if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_PURCHASE_RUN', 'Purchase run input must be a JSON object.');
-      const fallback = `sandbox-browser-${crypto.createHash('sha256').update(JSON.stringify({ request: input.request, scenario: input.scenario || 'happy' })).digest('hex')}`;
-      const result = service.startPurchase({ idempotencyKey: idempotencyKey(req, fallback), request: input.request, scenario: input.scenario || 'happy', origin: input.origin || 'operator' });
+      const fallback = `sandbox-browser-${crypto.createHash('sha256').update(JSON.stringify({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy' })).digest('hex')}`;
+      const result = service.startPurchase({ idempotencyKey: idempotencyKey(req, fallback), request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', origin: input.origin || 'operator' });
       return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
     });
   }

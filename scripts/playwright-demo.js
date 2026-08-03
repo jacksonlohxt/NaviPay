@@ -10,11 +10,11 @@ const app = spawn(process.execPath, ['src/server.js'], {
     PORT: appPort,
     NAVIPAY_PLAYWRIGHT_DISCOVERY: '1',
     NAVIPAY_DISCOVERY_ALLOWLIST: '127.0.0.1',
-    NAVIPAY_DISCOVERY_URLS: `http://127.0.0.1:${fixturePort}/merchants/apple-magic-keyboard.html`
+    NAVIPAY_DISCOVERY_URLS: `http://127.0.0.1:${fixturePort}/competition-site/`
   }
 });
 
-console.log(`Fixture merchant: http://127.0.0.1:${fixturePort}/merchants/apple-magic-keyboard.html`);
+console.log(`Competition replay site: http://127.0.0.1:${fixturePort}/competition-site/`);
 console.log(`NaviPay: http://127.0.0.1:${appPort}`);
 console.log('Press Ctrl-C to stop both local processes.');
 
