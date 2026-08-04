@@ -1243,6 +1243,14 @@ function safeReference(value) {
   return value || null;
 }
 
+function configuredProviderId(provider, fallback) {
+  return provider?.providerId || fallback;
+}
+
+function requireProviderIdentity(actual, expected, code, message) {
+  if (actual !== expected) throw new SandboxDomainError(422, code, message);
+}
+
 function safeAuthorizationEnvelope(envelope) {
   if (!envelope) return null;
   const constraints = envelope.normalizedConstraints || {};
@@ -1571,12 +1579,13 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
 }
 
 class NaviPaySandboxService {
-  constructor({ store, clock = () => new Date(), adapters = {}, fundingWebhookSecret = process.env.NAVIPAY_FUNDING_WEBHOOK_SECRET || null } = {}) {
+  constructor({ store, clock = () => new Date(), adapters = {}, fundingWebhookSecret = process.env.NAVIPAY_FUNDING_WEBHOOK_SECRET || null, kycWebhookSecret = process.env.NAVIPAY_KYC_WEBHOOK_SECRET || null } = {}) {
     if (!store) throw new Error('A store is required for the local sandbox.');
     this.kind = 'sandbox';
     this.store = store;
     this.clock = clock;
     this.fundingWebhookSecret = fundingWebhookSecret;
+    this.kycWebhookSecret = kycWebhookSecret;
     seedSandbox(store, clock);
     const localDiscovery = new LocalDiscoveryAdapter({ clock });
     this.localDiscoveryAdapter = localDiscovery;
@@ -1896,7 +1905,9 @@ class NaviPaySandboxService {
     let status;
     try {
       status = this.kycProvider.getStatus({ profile });
+      requireProviderIdentity(status.providerId, configuredProviderId(this.kycProvider, KYC_PROVIDER_ID), 'KYC_PROVIDER_MISMATCH', 'The normalized KYC status came from an unexpected provider.');
     } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
       throw new SandboxDomainError(503, error.code || 'KYC_UNAVAILABLE', error.message || 'The local KYC gate is unavailable.');
     }
     return safeKycProfile({ ...profile, ...status, customerId: profile.customerId, createdAt: profile.createdAt });
@@ -1926,8 +1937,10 @@ class NaviPaySandboxService {
     if (!decision || typeof decision !== 'object' || Array.isArray(decision)) throw new SandboxDomainError(400, 'INVALID_KYC_DECISION', 'KYC provider decision must be a JSON object.');
     const decisionId = decision.decisionId;
     if (typeof decisionId !== 'string' || !decisionId.trim() || decisionId.length > 200) throw new SandboxDomainError(422, 'INVALID_KYC_DECISION', 'KYC provider decision must include a bounded decisionId.');
+    const expectedProviderId = configuredProviderId(this.kycProvider, KYC_PROVIDER_ID);
+    requireProviderIdentity(decision.providerId, expectedProviderId, 'KYC_PROVIDER_MISMATCH', 'The KYC decision provider does not match the configured KYC provider.');
     const requestKey = idempotencyKey || decisionId;
-    const fingerprint = JSON.stringify({ decisionId, providerReference: decision.providerReference, action: decision.action, status: decision.status, reasonCode: decision.reasonCode || decision.reason });
+    const fingerprint = JSON.stringify({ decisionId, providerId: decision.providerId, providerReference: decision.providerReference, action: decision.action, status: decision.status, reasonCode: decision.reasonCode || decision.reason });
     const key = `sandbox:kyc:event:${requestKey}`;
     const previous = this._readIdempotency(key, fingerprint);
     if (previous?.response) return { ...clone(previous.response), replayed: true };
@@ -1943,7 +1956,9 @@ class NaviPaySandboxService {
     let normalizedDecision;
     try {
       normalizedDecision = this.kycProvider.receiveDecision({ profile, ...decision, decisionId });
+      requireProviderIdentity(normalizedDecision.providerId, expectedProviderId, 'KYC_PROVIDER_MISMATCH', 'The normalized KYC decision came from an unexpected provider.');
     } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
       throw new SandboxDomainError(422, error.code || 'INVALID_KYC_DECISION', error.message || 'The KYC provider decision could not be normalized.');
     }
     const response = this._applyKycDecision({ idempotencyKey: key, fingerprint, decision: normalizedDecision });
@@ -1956,6 +1971,7 @@ class NaviPaySandboxService {
   }
 
   _applyKycDecision({ fingerprint, decision } = {}) {
+    requireProviderIdentity(decision?.providerId, configuredProviderId(this.kycProvider, KYC_PROVIDER_ID), 'KYC_PROVIDER_MISMATCH', 'The KYC decision provider does not match the configured KYC provider.');
     const profileId = DEMO_CUSTOMER.id;
     const duplicate = this.store.transaction((data) => {
       const previous = data.kycEvents[decision.decisionId];
@@ -1980,16 +1996,30 @@ class NaviPaySandboxService {
     return this._kycResponse(duplicate, decision);
   }
 
-  reconcileKycReference(providerReference) {
+  reconcileKycReference(options = {}) {
+    const expectedProviderId = configuredProviderId(this.kycProvider, KYC_PROVIDER_ID);
+    if (typeof options === 'string') options = { providerReference: options, providerId: expectedProviderId };
+    const { idempotencyKey = null, providerId = null, providerReference } = options;
+    if (typeof providerReference !== 'string' || !providerReference.trim()) throw new SandboxDomainError(400, 'PROVIDER_REFERENCE_REQUIRED', 'Provide a KYC provider reference to reconcile.');
+    requireProviderIdentity(providerId, expectedProviderId, 'KYC_PROVIDER_MISMATCH', 'The KYC reference provider does not match the configured KYC provider.');
+    const requestKey = idempotencyKey || `kyc-reconcile-${providerReference}`;
+    const fingerprint = JSON.stringify({ providerId, providerReference });
+    const key = `sandbox:kyc:reconcile:${requestKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) return { ...clone(previous.response), replayed: true };
     const profile = this.getKycStatus();
     if (profile.providerReference !== providerReference) throw new SandboxDomainError(404, 'KYC_REFERENCE_NOT_FOUND', 'The KYC provider reference does not match the local profile.');
     let status;
     try {
       status = this.kycProvider.reconcileReference({ profile, providerReference });
+      requireProviderIdentity(status.providerId, expectedProviderId, 'KYC_PROVIDER_MISMATCH', 'The normalized KYC status came from an unexpected provider.');
     } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
       throw new SandboxDomainError(422, error.code || 'KYC_RECONCILIATION_FAILED', error.message || 'The KYC reference could not be reconciled.');
     }
-    return { statusCode: 200, body: { kyc: this.getKycProjection(), status: { providerReference: safeReference(status.providerReference), status: status.status, decisionReference: safeReference(status.decisionReference), decidedAt: status.decidedAt || null }, funding: this.getFundingProjection() }, replayed: false };
+    const response = { statusCode: 200, body: { kyc: this.getKycProjection(), status: { providerReference: safeReference(status.providerReference), status: status.status, decisionReference: safeReference(status.decisionReference), decidedAt: status.decidedAt || null }, funding: this.getFundingProjection() }, replayed: false };
+    this.store.transaction((data) => { data.idempotency[key] = { requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
+    return response;
   }
 
   _expireFundingIntents() {
@@ -2026,7 +2056,9 @@ class NaviPaySandboxService {
     let status;
     try {
       status = this.fundingProvider.getFundingStatus({ intent });
+      requireProviderIdentity(status.providerId, configuredProviderId(this.fundingProvider, FUNDING_PROVIDER_ID), 'FUNDING_PROVIDER_MISMATCH', 'The normalized funding status came from an unexpected provider.');
     } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
       throw new SandboxDomainError(503, error.code || 'FUNDING_STATUS_UNAVAILABLE', error.message || 'The funding provider status could not be retrieved.');
     }
     return { ...intent, status: status.status, confirmationEvidence: status.confirmationEvidence || intent.confirmationEvidence, failureReason: status.failureReason || intent.failureReason, updatedAt: status.updatedAt || intent.updatedAt };
@@ -2079,7 +2111,9 @@ class NaviPaySandboxService {
     let providerIntent;
     try {
       providerIntent = this.fundingProvider.createFundingIntent({ intentId: id, amountMinor: normalizedAmount, asset, network, expiresAt });
+      requireProviderIdentity(providerIntent.providerId, selectedProviderId, 'FUNDING_PROVIDER_MISMATCH', 'The normalized funding intent came from an unexpected provider.');
     } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
       throw new SandboxDomainError(422, error.code || 'FUNDING_PROVIDER_UNAVAILABLE', error.message || 'The funding provider could not create an intent.');
     }
     const intent = {
@@ -2117,8 +2151,10 @@ class NaviPaySandboxService {
     if (!event || typeof event !== 'object' || Array.isArray(event)) throw new SandboxDomainError(400, 'INVALID_FUNDING_EVENT', 'Funding provider event must be a JSON object.');
     const eventId = event.eventId;
     if (typeof eventId !== 'string' || !eventId.trim() || eventId.length > 200) throw new SandboxDomainError(422, 'INVALID_PROVIDER_EVENT', 'Funding provider event must include a bounded eventId.');
+    const expectedProviderId = configuredProviderId(this.fundingProvider, FUNDING_PROVIDER_ID);
+    requireProviderIdentity(event.providerId, expectedProviderId, 'FUNDING_PROVIDER_MISMATCH', 'The funding event provider does not match the configured funding provider.');
     const requestKey = idempotencyKey || eventId;
-    const fingerprint = JSON.stringify({ eventId, providerReference: event.providerReference, action: event.action, status: event.status, asset: event.asset, network: event.network, amountMinor: event.amountMinor, reason: event.reason });
+    const fingerprint = JSON.stringify({ eventId, providerId: event.providerId, providerReference: event.providerReference, action: event.action, status: event.status, asset: event.asset, network: event.network, amountMinor: event.amountMinor, reason: event.reason });
     const key = `sandbox:funding:event:${requestKey}`;
     const previous = this._readIdempotency(key, fingerprint);
     if (previous?.response) return { ...clone(previous.response), replayed: true };
@@ -2136,7 +2172,9 @@ class NaviPaySandboxService {
     let normalizedEvent;
     try {
       normalizedEvent = this.fundingProvider.receiveProviderEvent({ intent: clone(intent), ...event, eventId });
+      requireProviderIdentity(normalizedEvent.providerId, expectedProviderId, 'FUNDING_PROVIDER_MISMATCH', 'The normalized funding event came from an unexpected provider.');
     } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
       throw new SandboxDomainError(422, error.code || 'INVALID_PROVIDER_EVENT', error.message || 'The funding provider event could not be normalized.');
     }
     let duplicateCredit = false;
@@ -2232,18 +2270,31 @@ class NaviPaySandboxService {
     return response;
   }
 
-  reconcileFundingReference(providerReference) {
+  reconcileFundingReference(options = {}) {
+    const expectedProviderId = configuredProviderId(this.fundingProvider, FUNDING_PROVIDER_ID);
+    if (typeof options === 'string') options = { providerReference: options, providerId: expectedProviderId };
+    const { idempotencyKey = null, providerId = null, providerReference } = options;
     if (typeof providerReference !== 'string' || !providerReference.trim()) throw new SandboxDomainError(400, 'PROVIDER_REFERENCE_REQUIRED', 'Provide a funding provider reference to reconcile.');
+    requireProviderIdentity(providerId, expectedProviderId, 'FUNDING_PROVIDER_MISMATCH', 'The funding reference provider does not match the configured funding provider.');
+    const requestKey = idempotencyKey || `funding-reconcile-${providerReference}`;
+    const fingerprint = JSON.stringify({ providerId, providerReference });
+    const key = `sandbox:funding:reconcile:${requestKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) return { ...clone(previous.response), replayed: true };
     const intent = Object.values(this.store.data.fundingIntents).find((candidate) => candidate.providerReference === providerReference);
     if (!intent) throw new SandboxDomainError(404, 'PROVIDER_REFERENCE_NOT_FOUND', 'The funding provider reference does not match a persisted intent.');
     this._expireFundingIntents();
     let status;
     try {
       status = this.fundingProvider.reconcileReference({ intent: this.getFundingIntent(intent.id), providerReference });
+      requireProviderIdentity(status.providerId, expectedProviderId, 'FUNDING_PROVIDER_MISMATCH', 'The normalized funding status came from an unexpected provider.');
     } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
       throw new SandboxDomainError(422, error.code || 'FUNDING_RECONCILIATION_FAILED', error.message || 'The funding reference could not be reconciled.');
     }
-    return { statusCode: 200, body: { intent: safeFundingIntent(this.getFundingIntent(intent.id)), status: { providerReference: safeReference(status.providerReference), status: status.status, asset: status.asset, network: status.network, amountMinor: status.amountMinor, confirmationEvidence: safeFundingEvidence(status.confirmationEvidence), failureReason: status.failureReason || null }, funding: this.getFundingProjection() }, replayed: false };
+    const response = { statusCode: 200, body: { intent: safeFundingIntent(this.getFundingIntent(intent.id)), status: { providerReference: safeReference(status.providerReference), status: status.status, asset: status.asset, network: status.network, amountMinor: status.amountMinor, confirmationEvidence: safeFundingEvidence(status.confirmationEvidence), failureReason: status.failureReason || null }, funding: this.getFundingProjection() }, replayed: false };
+    this.store.transaction((data) => { data.idempotency[key] = { requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
+    return response;
   }
 
   getCatalog() {

@@ -6,8 +6,8 @@ const path = require('node:path');
 const { createServer } = require('../src/server');
 const { NaviPaySandboxService } = require('../src/sandbox');
 const { JsonStore, MemoryStore } = require('../src/store');
-const { FUNDING_ASSET, FUNDING_NETWORK, LocalMockXsgdFundingProvider, FundingProviderContract } = require('../src/funding');
-const { KYC_STATES, LocalMockKycProvider, KycProviderContract } = require('../src/kyc');
+const { FUNDING_ASSET, FUNDING_NETWORK, FUNDING_PROVIDER_ID, LocalMockXsgdFundingProvider, FundingProviderContract } = require('../src/funding');
+const { KYC_PROVIDER_ID, KYC_STATES, LocalMockKycProvider, KycProviderContract } = require('../src/kyc');
 
 function makeService(store = new MemoryStore(), clock = () => new Date('2026-01-01T10:00:00.000Z')) {
   return new NaviPaySandboxService({ store, clock });
@@ -30,6 +30,20 @@ test('funding and KYC adapters expose replaceable provider-neutral seams', () =>
   assert.equal(service.getFundingProjection().provider.id, 'local-mock-xsgd-avalanche');
   assert.equal(service.getFundingProjection().provider.live, false);
   assert.equal(service.getKycProjection().providerMode, 'local_mock');
+});
+
+test('normalized provider seams reject omitted and mismatched identities', () => {
+  const service = makeService();
+  const kycReference = service.getKycProjection().providerReference;
+  for (const providerId of [undefined, FUNDING_PROVIDER_ID, 'unexpected-kyc-provider']) {
+    assert.throws(() => service.receiveKycDecision({ idempotencyKey: `seam-kyc-${String(providerId)}`, decision: { providerId, providerReference: kycReference, decisionId: `seam-kyc-event-${String(providerId)}`, action: 'approve' } }), (error) => error.code === 'KYC_PROVIDER_MISMATCH');
+  }
+  approve(service, 'seam-approval');
+  const intent = createIntent(service, 'seam-funding').body.intent;
+  const event = { eventId: 'seam-funding-event', providerReference: intent.providerReference, action: 'confirm', asset: FUNDING_ASSET, network: FUNDING_NETWORK, amountMinor: intent.amountMinor };
+  for (const providerId of [undefined, KYC_PROVIDER_ID, 'unexpected-funding-provider']) {
+    assert.throws(() => service.receiveFundingEvent({ idempotencyKey: `seam-funding-${String(providerId)}`, event: { ...event, providerId } }), (error) => error.code === 'FUNDING_PROVIDER_MISMATCH');
+  }
 });
 
 test('pending, rejected, and approved KYC decisions gate funding creation', () => {
@@ -59,6 +73,7 @@ test('confirmed funding credits the authoritative wallet exactly once and duplic
   const intent = created.body.intent;
   const event = {
     eventId: 'provider-event-confirm-once',
+    providerId: 'local-mock-xsgd-avalanche',
     providerReference: intent.providerReference,
     action: 'confirm',
     asset: FUNDING_ASSET,
@@ -201,6 +216,94 @@ test('HTTP funding routes expose safe status and enforce local simulation author
     assert.doesNotMatch(JSON.stringify(confirmed.payload), /rawProviderPayload|identityDocument|passport|private.?key|secret/i);
     const status = await request(`/api/funding/intents/${created.payload.intent.id}`);
     assert.equal(status.payload.intent.status, 'confirmed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('HTTP provider boundaries require the exact provider identity and strict local header', async () => {
+  const service = makeService();
+  const server = createServer({ service });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  async function request(route, options = {}) {
+    const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...(options.headers || {}) } });
+    return { status: response.status, payload: await response.json() };
+  }
+  try {
+    const kycReference = (await request('/api/funding/kyc')).payload.kyc.providerReference;
+    const kycEvent = { providerReference: kycReference, decisionId: 'provider-boundary-kyc', action: 'approve' };
+    for (const [providerId, headerValue] of [[FUNDING_PROVIDER_ID, 'true'], [KYC_PROVIDER_ID, 'TRUE']]) {
+      const rejected = await request('/api/funding/kyc/webhooks', { method: 'POST', headers: { 'X-NaviPay-Local-Simulation': headerValue }, body: JSON.stringify({ ...kycEvent, providerId }) });
+      assert.equal(rejected.status, 403);
+    }
+    const omitted = await request('/api/funding/kyc/webhooks', { method: 'POST', headers: { 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify(kycEvent) });
+    assert.equal(omitted.status, 403);
+    const approved = await request('/api/funding/kyc/webhooks', { method: 'POST', headers: { 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify({ ...kycEvent, providerId: KYC_PROVIDER_ID }) });
+    assert.equal(approved.status, 200);
+
+    const created = await request('/api/funding/intents', { method: 'POST', headers: { 'Idempotency-Key': 'provider-boundary-funding' }, body: JSON.stringify({ amount: '2.00' }) });
+    const fundingEvent = { eventId: 'provider-boundary-funding-event', providerReference: created.payload.intent.providerReference, action: 'confirm', asset: FUNDING_ASSET, network: FUNDING_NETWORK, amountMinor: 200 };
+    for (const [providerId, headerValue] of [['local-mock-kyc', 'true'], [FUNDING_PROVIDER_ID, 'TRUE']]) {
+      const rejected = await request('/api/funding/webhooks', { method: 'POST', headers: { 'X-NaviPay-Local-Simulation': headerValue }, body: JSON.stringify({ ...fundingEvent, providerId }) });
+      assert.equal(rejected.status, 403);
+    }
+    const fundingOmitted = await request('/api/funding/webhooks', { method: 'POST', headers: { 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify(fundingEvent) });
+    assert.equal(fundingOmitted.status, 403);
+    const confirmed = await request('/api/funding/webhooks', { method: 'POST', headers: { 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify({ ...fundingEvent, providerId: FUNDING_PROVIDER_ID }) });
+    assert.equal(confirmed.status, 200);
+    assert.equal(confirmed.payload.intent.status, 'confirmed');
+    assert.doesNotMatch(JSON.stringify(confirmed.payload), /rawProviderPayload|credentials|identityDocument|passport/i);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('HTTP funding and KYC reference reconciliation is safe, normalized, and replayable', async () => {
+  const service = makeService();
+  const server = createServer({ service });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  async function request(route, options = {}) {
+    const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...(options.headers || {}) } });
+    return { status: response.status, payload: await response.json() };
+  }
+  const local = { 'X-NaviPay-Local-Simulation': 'true' };
+  try {
+    const kycReference = (await request('/api/funding/kyc')).payload.kyc.providerReference;
+    const kycBase = { providerId: KYC_PROVIDER_ID, providerReference: kycReference };
+    const missingKyc = await request('/api/funding/kyc/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ ...kycBase, providerReference: 'missing-kyc-reference' }) });
+    assert.equal(missingKyc.status, 404);
+    const wrongKycProvider = await request('/api/funding/kyc/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ ...kycBase, providerId: FUNDING_PROVIDER_ID }) });
+    assert.equal(wrongKycProvider.status, 403);
+    const kycFirst = await request('/api/funding/kyc/references/' + encodeURIComponent(kycReference) + '/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ providerId: KYC_PROVIDER_ID }) });
+    assert.equal(kycFirst.status, 200);
+    assert.equal(kycFirst.payload.status.providerReference, kycReference);
+    assert.equal(kycFirst.payload.status.status, 'pending');
+    const kycReplay = await request('/api/funding/kyc/reconcile', { method: 'POST', headers: local, body: JSON.stringify(kycBase) });
+    assert.equal(kycReplay.status, 200);
+    assert.equal(kycReplay.payload.replayed, true);
+    assert.equal(service.kycProvider.calls.reconcile, 1);
+
+    const approved = await request('/api/funding/kyc/webhooks', { method: 'POST', headers: local, body: JSON.stringify({ providerId: KYC_PROVIDER_ID, providerReference: kycReference, decisionId: 'reconcile-approval', action: 'approve' }) });
+    assert.equal(approved.status, 200);
+    const created = await request('/api/funding/intents', { method: 'POST', headers: { 'Idempotency-Key': 'reconcile-funding-create' }, body: JSON.stringify({ amount: '3.00' }) });
+    const fundingReference = created.payload.intent.providerReference;
+    const missingFunding = await request('/api/funding/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ providerId: FUNDING_PROVIDER_ID, providerReference: 'missing-funding-reference' }) });
+    assert.equal(missingFunding.status, 404);
+    const wrongFunding = await request('/api/funding/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ providerId: FUNDING_PROVIDER_ID, providerReference: kycReference }) });
+    assert.equal(wrongFunding.status, 404);
+    const wrongFundingProvider = await request('/api/funding/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ providerId: KYC_PROVIDER_ID, providerReference: fundingReference }) });
+    assert.equal(wrongFundingProvider.status, 403);
+    const fundingFirst = await request('/api/funding/references/' + encodeURIComponent(fundingReference) + '/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ providerId: FUNDING_PROVIDER_ID }) });
+    assert.equal(fundingFirst.status, 200);
+    assert.equal(fundingFirst.payload.status.providerReference, fundingReference);
+    assert.equal(fundingFirst.payload.status.status, 'pending');
+    const fundingReplay = await request('/api/funding/reconcile', { method: 'POST', headers: local, body: JSON.stringify({ providerId: FUNDING_PROVIDER_ID, providerReference: fundingReference }) });
+    assert.equal(fundingReplay.status, 200);
+    assert.equal(fundingReplay.payload.replayed, true);
+    assert.equal(service.fundingProvider.calls.reconcile, 1);
+    assert.doesNotMatch(JSON.stringify({ kycFirst, fundingFirst }), /rawProviderPayload|credentials|secret|identityDocument|passport/i);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
