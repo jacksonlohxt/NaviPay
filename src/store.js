@@ -25,7 +25,12 @@ function emptyState() {
     checkoutSessions: {},
     checkoutWebhooks: [],
     refunds: {},
-    workerRuns: {}
+    workerRuns: {},
+    fundingIntents: {},
+    fundingEvents: {},
+    fundingCredits: {},
+    kycProfiles: {},
+    kycEvents: {}
   };
 }
 
@@ -74,6 +79,11 @@ function validateState(value, filePath = 'store') {
   ensureCollection(state, 'checkoutWebhooks', 'array');
   ensureCollection(state, 'refunds', 'object');
   ensureCollection(state, 'workerRuns', 'object');
+  ensureCollection(state, 'fundingIntents', 'object');
+  ensureCollection(state, 'fundingEvents', 'object');
+  ensureCollection(state, 'fundingCredits', 'object');
+  ensureCollection(state, 'kycProfiles', 'object');
+  ensureCollection(state, 'kycEvents', 'object');
   return state;
 }
 

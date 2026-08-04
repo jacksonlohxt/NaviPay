@@ -106,6 +106,25 @@ button:disabled { cursor: wait; opacity: .62; }
 .product-amount { min-width: 130px; text-align: right; }
 .product-amount strong { font-size: 1rem; }
 .product-amount small { font-size: .64rem; }
+.funding-panel { margin-bottom: .85rem; background: #f7fff0; }
+.funding-panel h2 { color: var(--ink); }
+.funding-overview { display: grid; grid-template-columns: repeat(2, 1fr); gap: .55rem; margin-bottom: .75rem; }
+.funding-gate { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .75rem; padding: .8rem; border: 1px solid #d4e4c2; border-radius: 13px; background: rgba(217,241,229,.45); }
+.funding-gate strong, .funding-gate small { display: block; }
+.funding-gate strong { margin-top: .22rem; font-size: .78rem; }
+.funding-gate strong > span { margin-left: .3rem; color: var(--muted); font-size: .64rem; font-weight: 700; }
+.funding-gate small { margin-top: .22rem; color: var(--muted); font-size: .66rem; }
+.funding-form-row { display: flex; gap: .5rem; }
+.funding-form-row input { min-width: 0; flex: 1; min-height: 38px; padding: .5rem .65rem; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font-size: .78rem; }
+.funding-form-row input:disabled { background: #eef0e9; }
+.funding-disclosure { display: block; margin-top: .45rem; color: var(--muted); font-size: .65rem; }
+.funding-intent { margin-top: .85rem; padding-top: .85rem; border-top: 1px solid var(--line); }
+.funding-intent > .panel-heading { align-items: center; margin-bottom: .65rem; }
+.funding-intent > .panel-heading strong { display: block; margin-top: .22rem; font-size: .95rem; }
+.funding-instructions { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; }
+.funding-instructions .data-cell { background: rgba(217,241,229,.5); }
+.funding-expiry, .funding-reason { display: block; margin-top: .6rem; color: var(--muted); font-size: .64rem; }
+.funding-reason { color: #854631; font-weight: 750; }
 .balance-panel { grid-area: balance; background: var(--mint); }
 .fixture-chip { padding: .3rem .45rem; border-radius: 999px; background: var(--ink); color: var(--lime); font-size: .55rem; font-weight: 950; letter-spacing: .08em; white-space: nowrap; }
 .balance-grid, .commerce-grid, .quote-breakdown { display: grid; grid-template-columns: repeat(2, 1fr); gap: .55rem; }
@@ -212,7 +231,10 @@ button:disabled { cursor: wait; opacity: .62; }
   .run-heading { align-items: flex-start; flex-direction: column; }
   .product-highlight { grid-template-columns: 1fr; }
   .product-amount { min-width: 0; text-align: left; }
-  .balance-grid, .commerce-grid, .quote-breakdown, .card-status-grid { grid-template-columns: 1fr; }
+  .balance-grid, .commerce-grid, .quote-breakdown, .card-status-grid, .funding-overview, .funding-instructions { grid-template-columns: 1fr; }
+  .funding-gate { align-items: flex-start; flex-direction: column; }
+  .funding-form-row { flex-direction: column; }
+  .funding-form-row .secondary-button { width: 100%; }
   .progress-track { grid-template-columns: repeat(2, 1fr); }
   .candidate-row { align-items: flex-start; flex-direction: column; }
   .candidate-end { width: 100%; justify-items: start; text-align: left; }

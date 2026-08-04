@@ -4,6 +4,25 @@ const { createConfiguredDiscoveryAdapter, DISCOVERY_SOURCE, DISCOVERY_RANKING_PO
 const { CURRENCY } = require('./domain');
 const { LocalFakeIssuerAdapter } = require('./issuer');
 const { LocalCheckoutWorker } = require('./checkout-worker');
+const {
+  FUNDING_ASSET,
+  FUNDING_NETWORK,
+  FUNDING_PROVIDER_ID,
+  FUNDING_STATES,
+  LocalMockXsgdFundingProvider,
+  formatAmount: formatFundingAmount,
+  normalizeAction,
+  normalizeAmountMinor,
+  stableReference: fundingStableReference
+} = require('./funding');
+const {
+  KYC_PROVIDER_ID,
+  KYC_REASON_CODES,
+  KYC_STATES,
+  LocalMockKycProvider,
+  normalizeDecision,
+  stableReference: kycStableReference
+} = require('./kyc');
 
 const SANDBOX_MODE = 'simulated local sandbox';
 const DEFAULT_ADAPTER_TIMEOUT_MS = 5000;
@@ -826,7 +845,7 @@ class LocalDeliveryAdapter {
   }
 }
 
-function seedSandbox(store) {
+function seedSandbox(store, clock = () => new Date()) {
   store.transaction((data) => {
     if (!data.wallets[DEMO_WALLET.id]) {
       data.wallets[DEMO_WALLET.id] = {
@@ -838,6 +857,21 @@ function seedSandbox(store) {
         balanceMinor: DEMO_WALLET.initialBalanceMinor,
         status: 'active',
         mode: SANDBOX_MODE
+      };
+    }
+    if (!data.kycProfiles[DEMO_CUSTOMER.id]) {
+      const createdAt = now(clock);
+      data.kycProfiles[DEMO_CUSTOMER.id] = {
+        customerId: DEMO_CUSTOMER.id,
+        providerId: KYC_PROVIDER_ID,
+        providerMode: 'local_mock',
+        providerReference: kycStableReference('MOCK-KYC', DEMO_CUSTOMER.id),
+        status: 'pending',
+        decisionReference: null,
+        reasonCode: null,
+        createdAt,
+        updatedAt: createdAt,
+        decidedAt: null
       };
     }
     for (const entry of CATALOG) {
@@ -870,7 +904,82 @@ function publicWallet(wallet) {
     initialBalanceMinor: wallet.initialBalanceMinor,
     status: wallet.status,
     mode: wallet.mode,
-    disclosure: 'Seeded fake wallet balance. No real funds or custody are involved.'
+    disclosure: 'Seeded fake wallet balance plus local mock funding. No real funds or custody are involved.'
+  };
+}
+
+function safeKycProfile(profile) {
+  if (!profile) return null;
+  return {
+    customerId: profile.customerId,
+    providerId: profile.providerId,
+    providerMode: profile.providerMode,
+    providerReference: safeReference(profile.providerReference),
+    status: KYC_STATES.includes(profile.status) ? profile.status : 'pending',
+    decisionReference: safeReference(profile.decisionReference),
+    reasonCode: KYC_REASON_CODES.includes(profile.reasonCode) ? profile.reasonCode : null,
+    createdAt: profile.createdAt || null,
+    updatedAt: profile.updatedAt || null,
+    decidedAt: profile.decidedAt || null,
+    disclosure: 'LOCAL SIMULATION ONLY - this is a mock KYC gate. No identity documents were collected, stored, or verified.'
+  };
+}
+
+function safeFundingEvidence(evidence) {
+  if (!evidence) return null;
+  return {
+    type: evidence.type || 'provider_evidence',
+    providerReference: safeReference(evidence.providerReference),
+    network: evidence.network || null,
+    asset: evidence.asset || null,
+    amountMinor: evidence.amountMinor ?? null,
+    transactionReference: safeReference(evidence.transactionReference),
+    confirmationCount: evidence.confirmationCount ?? null,
+    observedAt: evidence.observedAt || null,
+    note: evidence.note || null
+  };
+}
+
+function safeFundingIntent(intent) {
+  if (!intent) return null;
+  const instructions = intent.depositInstructions || {};
+  return {
+    id: intent.id,
+    providerId: intent.providerId,
+    providerMode: intent.providerMode,
+    status: FUNDING_STATES.includes(intent.status) ? intent.status : 'pending',
+    providerReference: safeReference(intent.providerReference),
+    network: intent.network,
+    asset: intent.asset,
+    amountMinor: intent.amountMinor,
+    amount: formatFundingAmount(intent.amountMinor),
+    createdAt: intent.createdAt,
+    updatedAt: intent.updatedAt,
+    expiresAt: intent.expiresAt,
+    confirmedAt: intent.confirmedAt || null,
+    failedAt: intent.failedAt || null,
+    expiredAt: intent.expiredAt || null,
+    reversedAt: intent.reversedAt || null,
+    failureReason: intent.failureReason || null,
+    confirmationEvidence: safeFundingEvidence(intent.confirmationEvidence),
+    depositInstructions: {
+      mode: instructions.mode || 'local_mock',
+      destination: instructions.destination || null,
+      memo: instructions.memo || null,
+      amountMinor: instructions.amountMinor ?? intent.amountMinor,
+      asset: instructions.asset || intent.asset,
+      network: instructions.network || intent.network,
+      expiresAt: instructions.expiresAt || intent.expiresAt,
+      disclosure: instructions.disclosure || 'Local mock deposit instructions only.'
+    },
+    credit: intent.credit ? {
+      status: intent.credit.status,
+      transactionReference: safeReference(intent.credit.transactionReference),
+      creditedAt: intent.credit.creditedAt || null,
+      reversalTransactionReference: safeReference(intent.credit.reversalTransactionReference),
+      reversedAt: intent.credit.reversedAt || null
+    } : { status: 'not_credited', transactionReference: null, creditedAt: null, reversalTransactionReference: null, reversedAt: null },
+    disclosure: 'LOCAL SIMULATION ONLY - this funding intent does not accept real XSGD and does not create blockchain activity.'
   };
 }
 
@@ -1146,16 +1255,19 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
 }
 
 class NaviPaySandboxService {
-  constructor({ store, clock = () => new Date(), adapters = {} } = {}) {
+  constructor({ store, clock = () => new Date(), adapters = {}, fundingWebhookSecret = process.env.NAVIPAY_FUNDING_WEBHOOK_SECRET || null } = {}) {
     if (!store) throw new Error('A store is required for the local sandbox.');
     this.kind = 'sandbox';
     this.store = store;
     this.clock = clock;
-    seedSandbox(store);
+    this.fundingWebhookSecret = fundingWebhookSecret;
+    seedSandbox(store, clock);
     const localDiscovery = new LocalDiscoveryAdapter({ clock });
     this.localDiscoveryAdapter = localDiscovery;
     this.discoveryAdapter = adapters.discovery || createConfiguredDiscoveryAdapter({ clock, fallback: localDiscovery, catalog: CATALOG });
     this.fundingAdapter = adapters.funding || new LocalFundingAdapter({ store, clock });
+    this.fundingProvider = adapters.fundingProvider || new LocalMockXsgdFundingProvider({ clock });
+    this.kycProvider = adapters.kycProvider || new LocalMockKycProvider({ clock });
     this.inventoryAdapter = adapters.inventory || new LocalInventoryAdapter({ store, clock });
     this.walletAdapter = adapters.wallet || new LocalWalletTransferAdapter({ store, clock });
     this.issuerAdapter = adapters.issuer || new LocalIssuerAdapter({ store, clock, walletAdapter: this.walletAdapter });
@@ -1416,6 +1528,367 @@ class NaviPaySandboxService {
 
   getWallet() {
     return publicWallet(this.store.data.wallets[DEMO_WALLET.id]);
+  }
+
+  getKycStatus() {
+    const profile = this.store.data.kycProfiles[DEMO_CUSTOMER.id];
+    if (!profile) throw new SandboxDomainError(503, 'KYC_UNAVAILABLE', 'The local KYC gate is unavailable.');
+    return clone(profile);
+  }
+
+  getKycProjection() {
+    const profile = this.getKycStatus();
+    let status;
+    try {
+      status = this.kycProvider.getStatus({ profile });
+    } catch (error) {
+      throw new SandboxDomainError(503, error.code || 'KYC_UNAVAILABLE', error.message || 'The local KYC gate is unavailable.');
+    }
+    return safeKycProfile({ ...profile, ...status, customerId: profile.customerId, createdAt: profile.createdAt });
+  }
+
+  simulateKycDecision(idempotencyKey, action, reasonCode = null) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) throw new SandboxDomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key for the KYC simulation.');
+    const normalizedAction = normalizeDecision(action);
+    const fingerprint = JSON.stringify({ action: normalizedAction, reasonCode: reasonCode || null });
+    const key = `sandbox:kyc:simulate:${idempotencyKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) return { ...clone(previous.response), replayed: true };
+    const profile = this.getKycStatus();
+    let decision;
+    try {
+      const decisionSequence = Object.keys(this.store.data.kycEvents).length;
+      decision = this.kycProvider.receiveDecision({ profile, decisionId: kycStableReference('MOCK-KYC-EVENT', `${profile.providerReference}:${normalizedAction}:${decisionSequence}`), action: normalizedAction, reasonCode });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'INVALID_KYC_DECISION', error.message || 'The local KYC decision could not be simulated.');
+    }
+    const response = this._applyKycDecision({ idempotencyKey: key, fingerprint, decision });
+    this.store.transaction((data) => { data.idempotency[key] = { requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
+    return response;
+  }
+
+  receiveKycDecision({ idempotencyKey = null, decision = {} } = {}) {
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision)) throw new SandboxDomainError(400, 'INVALID_KYC_DECISION', 'KYC provider decision must be a JSON object.');
+    const decisionId = decision.decisionId;
+    if (typeof decisionId !== 'string' || !decisionId.trim() || decisionId.length > 200) throw new SandboxDomainError(422, 'INVALID_KYC_DECISION', 'KYC provider decision must include a bounded decisionId.');
+    const requestKey = idempotencyKey || decisionId;
+    const fingerprint = JSON.stringify({ decisionId, providerReference: decision.providerReference, action: decision.action, status: decision.status, reasonCode: decision.reasonCode || decision.reason });
+    const key = `sandbox:kyc:event:${requestKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) return { ...clone(previous.response), replayed: true };
+    const profile = this.getKycStatus();
+    if (profile.providerReference !== decision.providerReference) throw new SandboxDomainError(404, 'KYC_REFERENCE_NOT_FOUND', 'The KYC provider reference does not match the local profile.');
+    const previousEvent = this.store.data.kycEvents[decisionId];
+    if (previousEvent) {
+      if (previousEvent.fingerprint !== fingerprint) throw new SandboxDomainError(409, 'KYC_DECISION_REUSED', 'The KYC decision ID was already used for different data.');
+      const replay = this._kycResponse(true);
+      this.store.transaction((data) => { data.idempotency[key] = { requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(replay) }; });
+      return replay;
+    }
+    let normalizedDecision;
+    try {
+      normalizedDecision = this.kycProvider.receiveDecision({ profile, ...decision, decisionId });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'INVALID_KYC_DECISION', error.message || 'The KYC provider decision could not be normalized.');
+    }
+    const response = this._applyKycDecision({ idempotencyKey: key, fingerprint, decision: normalizedDecision });
+    this.store.transaction((data) => { data.idempotency[key] = { requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
+    return response;
+  }
+
+  _kycResponse(replayed = false, decision = null) {
+    return { statusCode: 200, body: { kyc: this.getKycProjection(), funding: this.getFundingProjection(), decision: decision ? { decisionId: decision.decisionId, status: decision.status, decisionReference: safeReference(decision.decisionReference) } : null }, replayed };
+  }
+
+  _applyKycDecision({ fingerprint, decision } = {}) {
+    const profileId = DEMO_CUSTOMER.id;
+    const duplicate = this.store.transaction((data) => {
+      const previous = data.kycEvents[decision.decisionId];
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new SandboxDomainError(409, 'KYC_DECISION_REUSED', 'The KYC decision ID was already used for different data.');
+        return true;
+      }
+      const profile = data.kycProfiles[profileId];
+      const nextStatus = decision.status;
+      const allowed = profile.status === nextStatus || profile.status === 'pending' || profile.status === 'approved' && ['pending', 'rejected'].includes(nextStatus) || profile.status === 'rejected' && ['pending', 'approved'].includes(nextStatus);
+      if (!allowed) throw new SandboxDomainError(409, 'INVALID_KYC_TRANSITION', `KYC status cannot move from ${profile.status} to ${nextStatus}.`);
+      profile.status = nextStatus;
+      profile.providerId = decision.providerId || profile.providerId;
+      profile.providerMode = decision.providerMode || profile.providerMode;
+      profile.decisionReference = decision.decisionReference;
+      profile.reasonCode = decision.reasonCode || null;
+      profile.decidedAt = decision.decidedAt;
+      profile.updatedAt = decision.decidedAt;
+      data.kycEvents[decision.decisionId] = { decisionId: decision.decisionId, providerReference: profile.providerReference, status: nextStatus, fingerprint, receivedAt: decision.decidedAt };
+      return false;
+    });
+    return this._kycResponse(duplicate, decision);
+  }
+
+  reconcileKycReference(providerReference) {
+    const profile = this.getKycStatus();
+    if (profile.providerReference !== providerReference) throw new SandboxDomainError(404, 'KYC_REFERENCE_NOT_FOUND', 'The KYC provider reference does not match the local profile.');
+    let status;
+    try {
+      status = this.kycProvider.reconcileReference({ profile, providerReference });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'KYC_RECONCILIATION_FAILED', error.message || 'The KYC reference could not be reconciled.');
+    }
+    return { statusCode: 200, body: { kyc: this.getKycProjection(), status: { providerReference: safeReference(status.providerReference), status: status.status, decisionReference: safeReference(status.decisionReference), decidedAt: status.decidedAt || null }, funding: this.getFundingProjection() }, replayed: false };
+  }
+
+  _expireFundingIntents() {
+    const timestamp = this.clock().getTime();
+    this.store.transaction((data) => {
+      for (const intent of Object.values(data.fundingIntents)) {
+        if (intent.status !== 'pending' || !intent.expiresAt || Date.parse(intent.expiresAt) > timestamp) continue;
+        intent.status = 'expired';
+        intent.expiredAt = intent.expiredAt || now(this.clock);
+        intent.updatedAt = intent.expiredAt;
+        intent.failureReason = intent.failureReason || 'The local deposit intent expired before confirmation.';
+      }
+    });
+  }
+
+  _fundingResponse(intentId, statusCode = 200, replayed = false, extra = {}) {
+    const intent = this.getFundingIntent(intentId);
+    return {
+      statusCode,
+      body: { intent: safeFundingIntent(intent), funding: this.getFundingProjection(), ...extra },
+      replayed
+    };
+  }
+
+  getFundingIntent(intentId) {
+    this._expireFundingIntents();
+    const intent = this.store.data.fundingIntents[intentId];
+    if (!intent) throw new SandboxDomainError(404, 'FUNDING_INTENT_NOT_FOUND', 'That funding intent does not exist.');
+    return clone(intent);
+  }
+
+  getFundingStatus(intentId) {
+    const intent = this.getFundingIntent(intentId);
+    let status;
+    try {
+      status = this.fundingProvider.getFundingStatus({ intent });
+    } catch (error) {
+      throw new SandboxDomainError(503, error.code || 'FUNDING_STATUS_UNAVAILABLE', error.message || 'The funding provider status could not be retrieved.');
+    }
+    return { ...intent, status: status.status, confirmationEvidence: status.confirmationEvidence || intent.confirmationEvidence, failureReason: status.failureReason || intent.failureReason, updatedAt: status.updatedAt || intent.updatedAt };
+  }
+
+  getFundingProjection() {
+    this._expireFundingIntents();
+    const intents = Object.values(this.store.data.fundingIntents).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    const providerId = this.fundingProvider.providerId || FUNDING_PROVIDER_ID;
+    const providerMode = this.fundingProvider.providerMode || (this.fundingProvider instanceof LocalMockXsgdFundingProvider ? 'local_mock' : 'configured');
+    return {
+      version: 1,
+      provider: {
+        id: providerId,
+        mode: providerMode,
+        live: false,
+        disclosure: providerMode === 'local_mock' ? 'Local deterministic mock provider. No real XSGD, wallet, or Avalanche transaction is involved.' : 'Provider adapter is configured server-side and its live status is not represented by this local projection.'
+      },
+      asset: FUNDING_ASSET,
+      network: FUNDING_NETWORK,
+      availableBalanceMinor: this.store.data.wallets[DEMO_WALLET.id]?.balanceMinor ?? null,
+      wallet: this.getWallet(),
+      kyc: this.getKycProjection(),
+      intents: intents.map(safeFundingIntent),
+      disclosure: 'LOCAL SIMULATION ONLY - funding controls exercise a credential-free mock lifecycle and never accept real deposits.'
+    };
+  }
+
+  createFundingIntent({ idempotencyKey, amount, amountMinor, asset = FUNDING_ASSET, network = FUNDING_NETWORK, providerId = null } = {}) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) throw new SandboxDomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key for the funding intent.');
+    const selectedProviderId = providerId || this.fundingProvider.providerId || FUNDING_PROVIDER_ID;
+    const fingerprint = JSON.stringify({ amount, amountMinor, asset, network, providerId: selectedProviderId, walletId: DEMO_WALLET.id });
+    const key = `sandbox:funding:create:${idempotencyKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) return { ...clone(previous.response), replayed: true };
+    let normalizedAmount;
+    try {
+      normalizedAmount = normalizeAmountMinor({ amount, amountMinor });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'MALFORMED_AMOUNT', error.message);
+    }
+    const kyc = this.getKycProjection();
+    if (kyc.status !== 'approved') throw new SandboxDomainError(409, 'KYC_NOT_APPROVED', `XSGD funding requires approved KYC; current status is ${kyc.status}.`, { status: kyc.status, providerReference: safeReference(kyc.providerReference), decisionReference: safeReference(kyc.decisionReference) });
+    if (selectedProviderId !== this.fundingProvider.providerId) throw new SandboxDomainError(422, 'UNSUPPORTED_FUNDING_PROVIDER', 'The requested funding provider is not configured server-side.');
+    const wallet = this.store.data.wallets[DEMO_WALLET.id];
+    if (!wallet || wallet.status !== 'active' || wallet.currency !== FUNDING_ASSET) throw new SandboxDomainError(503, 'FUNDING_WALLET_UNAVAILABLE', 'The fake wallet is not available for funding.');
+    const createdAt = now(this.clock);
+    const expiresAt = new Date(this.clock().getTime() + 30 * 60 * 1000).toISOString();
+    const id = `funding_${crypto.randomUUID()}`;
+    let providerIntent;
+    try {
+      providerIntent = this.fundingProvider.createFundingIntent({ intentId: id, amountMinor: normalizedAmount, asset, network, expiresAt });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'FUNDING_PROVIDER_UNAVAILABLE', error.message || 'The funding provider could not create an intent.');
+    }
+    const intent = {
+      id,
+      walletId: DEMO_WALLET.id,
+      providerId: providerIntent.providerId || selectedProviderId,
+      providerMode: providerIntent.providerMode || 'configured',
+      status: 'pending',
+      providerReference: providerIntent.providerReference,
+      network: providerIntent.network,
+      asset: providerIntent.asset,
+      amountMinor: providerIntent.amountMinor,
+      depositInstructions: providerIntent.depositInstructions,
+      confirmationEvidence: null,
+      failureReason: null,
+      createdAt,
+      updatedAt: createdAt,
+      expiresAt: providerIntent.expiresAt || expiresAt,
+      confirmedAt: null,
+      failedAt: null,
+      expiredAt: null,
+      reversedAt: null,
+      credit: { status: 'not_credited', transactionReference: null, creditedAt: null, reversalTransactionReference: null, reversedAt: null }
+    };
+    this.store.transaction((data) => {
+      data.fundingIntents[id] = intent;
+      data.idempotency[key] = { intentId: id, requestFingerprint: fingerprint, createdAt, response: null };
+    });
+    const response = this._fundingResponse(id, 201, false);
+    this.store.transaction((data) => { data.idempotency[key] = { ...data.idempotency[key], response: clone(response) }; });
+    return response;
+  }
+
+  receiveFundingEvent({ idempotencyKey = null, event = {} } = {}) {
+    if (!event || typeof event !== 'object' || Array.isArray(event)) throw new SandboxDomainError(400, 'INVALID_FUNDING_EVENT', 'Funding provider event must be a JSON object.');
+    const eventId = event.eventId;
+    if (typeof eventId !== 'string' || !eventId.trim() || eventId.length > 200) throw new SandboxDomainError(422, 'INVALID_PROVIDER_EVENT', 'Funding provider event must include a bounded eventId.');
+    const requestKey = idempotencyKey || eventId;
+    const fingerprint = JSON.stringify({ eventId, providerReference: event.providerReference, action: event.action, status: event.status, asset: event.asset, network: event.network, amountMinor: event.amountMinor, reason: event.reason });
+    const key = `sandbox:funding:event:${requestKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) return { ...clone(previous.response), replayed: true };
+    const rawIntent = Object.values(this.store.data.fundingIntents).find((candidate) => candidate.providerReference === event.providerReference);
+    if (!rawIntent) throw new SandboxDomainError(404, 'PROVIDER_REFERENCE_NOT_FOUND', 'The funding provider reference does not match a persisted intent.');
+    this._expireFundingIntents();
+    const intent = this.store.data.fundingIntents[rawIntent.id];
+    const previousEvent = this.store.data.fundingEvents[eventId];
+    if (previousEvent) {
+      if (previousEvent.fingerprint !== fingerprint) throw new SandboxDomainError(409, 'PROVIDER_EVENT_REUSED', 'The provider event ID was already used for different funding data.');
+      const replay = this._fundingResponse(intent.id, 200, true, { duplicateEvent: true });
+      this.store.transaction((data) => { data.idempotency[key] = { intentId: intent.id, requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(replay) }; });
+      return replay;
+    }
+    let normalizedEvent;
+    try {
+      normalizedEvent = this.fundingProvider.receiveProviderEvent({ intent: clone(intent), ...event, eventId });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'INVALID_PROVIDER_EVENT', error.message || 'The funding provider event could not be normalized.');
+    }
+    let duplicateCredit = false;
+    if (normalizedEvent.status === 'confirmed' && intent.status === 'pending') {
+      const kyc = this.getKycProjection();
+      if (kyc.status !== 'approved') throw new SandboxDomainError(409, 'KYC_NOT_APPROVED', `XSGD funding credit requires approved KYC; current status is ${kyc.status}.`, { status: kyc.status, providerReference: safeReference(kyc.providerReference), decisionReference: safeReference(kyc.decisionReference) });
+    }
+    try {
+      this.store.transaction((data) => {
+        const current = data.fundingIntents[intent.id];
+        const nextStatus = normalizedEvent.status;
+        const allowed = current.status === nextStatus
+          || current.status === 'pending' && ['confirmed', 'failed', 'expired'].includes(nextStatus)
+          || current.status === 'confirmed' && nextStatus === 'reversed';
+        if (!allowed) throw new SandboxDomainError(409, 'INVALID_FUNDING_TRANSITION', `Funding intent cannot move from ${current.status} to ${nextStatus}.`);
+        if (current.status === nextStatus && nextStatus === 'confirmed' && data.fundingCredits[current.id]) duplicateCredit = true;
+        if (current.status === 'pending' && nextStatus === 'confirmed') {
+          const kyc = data.kycProfiles[DEMO_CUSTOMER.id];
+          if (!kyc || kyc.status !== 'approved') throw new SandboxDomainError(409, 'KYC_NOT_APPROVED', `XSGD funding credit requires approved KYC; current status is ${kyc?.status || 'unavailable'}.`, { status: kyc?.status || 'unavailable', providerReference: safeReference(kyc?.providerReference), decisionReference: safeReference(kyc?.decisionReference) });
+          const wallet = data.wallets[current.walletId];
+          if (!wallet || wallet.currency !== current.asset) throw new SandboxDomainError(503, 'FUNDING_WALLET_UNAVAILABLE', 'The authoritative fake wallet is unavailable for funding credit.');
+          const existingCredit = data.fundingCredits[current.id];
+          if (existingCredit?.status === 'credited' || existingCredit?.status === 'reversed') {
+            duplicateCredit = true;
+          } else {
+            const transactionReference = fundingStableReference('FUNDING-TX', current.id);
+            const occurredAt = normalizedEvent.receivedAt;
+            wallet.balanceMinor += current.amountMinor;
+            data.walletLedger.push(
+              { id: `${transactionReference}:source`, transactionReference, operationId: `funding:${current.id}`, intentId: current.id, kind: 'funding', entry: 'debit', accountId: `provider:${current.providerId}`, amountMinor: current.amountMinor, currency: current.asset, occurredAt },
+              { id: `${transactionReference}:wallet`, transactionReference, operationId: `funding:${current.id}`, intentId: current.id, kind: 'funding', entry: 'credit', accountId: current.walletId, amountMinor: current.amountMinor, currency: current.asset, occurredAt }
+            );
+            data.fundingCredits[current.id] = { intentId: current.id, status: 'credited', transactionReference, creditedAt: occurredAt, reversalTransactionReference: null, reversedAt: null };
+            current.credit = data.fundingCredits[current.id];
+          }
+          current.confirmedAt = current.confirmedAt || normalizedEvent.receivedAt;
+          current.confirmationEvidence = normalizedEvent.confirmationEvidence;
+        } else if (current.status === 'confirmed' && nextStatus === 'reversed') {
+          const credit = data.fundingCredits[current.id];
+          const wallet = data.wallets[current.walletId];
+          if (!credit || !['credited'].includes(credit.status)) throw new SandboxDomainError(409, 'FUNDING_NOT_CREDITED', 'Only credited funding can be reversed.');
+          if (!wallet || wallet.balanceMinor < current.amountMinor) throw new SandboxDomainError(409, 'INSUFFICIENT_FUNDS_FOR_REVERSAL', 'The fake wallet does not have enough balance to reverse this funding credit.');
+          const transactionReference = fundingStableReference('FUNDING-REVERSAL', current.id);
+          wallet.balanceMinor -= current.amountMinor;
+          data.walletLedger.push(
+            { id: `${transactionReference}:wallet`, transactionReference, operationId: `funding:${current.id}:reversal`, intentId: current.id, kind: 'funding_reversal', entry: 'debit', accountId: current.walletId, amountMinor: current.amountMinor, currency: current.asset, occurredAt: normalizedEvent.receivedAt },
+            { id: `${transactionReference}:source`, transactionReference, operationId: `funding:${current.id}:reversal`, intentId: current.id, kind: 'funding_reversal', entry: 'credit', accountId: `provider:${current.providerId}`, amountMinor: current.amountMinor, currency: current.asset, occurredAt: normalizedEvent.receivedAt }
+          );
+          credit.status = 'reversed';
+          credit.reversalTransactionReference = transactionReference;
+          credit.reversedAt = normalizedEvent.receivedAt;
+          current.credit = credit;
+          current.reversedAt = normalizedEvent.receivedAt;
+          current.confirmationEvidence = normalizedEvent.confirmationEvidence || current.confirmationEvidence;
+        } else if (current.status === 'pending' && nextStatus === 'failed') {
+          current.failedAt = current.failedAt || normalizedEvent.receivedAt;
+          current.failureReason = normalizedEvent.reason || 'The local funding provider reported a failure.';
+        } else if (current.status === 'pending' && nextStatus === 'expired') {
+          current.expiredAt = current.expiredAt || normalizedEvent.receivedAt;
+          current.failureReason = normalizedEvent.reason || 'The funding intent expired before confirmation.';
+        }
+        if (current.status !== nextStatus && !duplicateCredit) current.status = nextStatus;
+        current.updatedAt = normalizedEvent.receivedAt;
+        data.fundingEvents[eventId] = { eventId, intentId: current.id, providerReference: current.providerReference, status: nextStatus, fingerprint, receivedAt: normalizedEvent.receivedAt };
+        if (!data.fundingEvents[eventId]) throw new SandboxDomainError(500, 'FUNDING_EVENT_NOT_RECORDED', 'The funding provider event could not be recorded.');
+      });
+    } catch (error) {
+      if (error instanceof SandboxDomainError) throw error;
+      throw new SandboxDomainError(409, error.code || 'FUNDING_EVENT_REJECTED', error.message || 'The funding provider event was rejected.');
+    }
+    const response = this._fundingResponse(intent.id, 200, false, { duplicateCredit, event: { eventId, status: normalizedEvent.status } });
+    this.store.transaction((data) => { data.idempotency[key] = { intentId: intent.id, requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
+    return response;
+  }
+
+  simulateFundingIntent(intentId, idempotencyKey, action) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) throw new SandboxDomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key for the funding simulation.');
+    const normalizedAction = normalizeAction(action);
+    const fingerprint = JSON.stringify({ intentId, action: normalizedAction });
+    const key = `sandbox:funding:simulate:${idempotencyKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) return { ...clone(previous.response), replayed: true };
+    const intent = this.getFundingIntent(intentId);
+    if (typeof this.fundingProvider.simulate !== 'function') throw new SandboxDomainError(409, 'LOCAL_SIMULATION_UNAVAILABLE', 'This funding provider does not expose the local simulation path.');
+    let event;
+    try {
+      event = this.fundingProvider.simulate({ intent, action: normalizedAction });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'INVALID_SIMULATION_ACTION', error.message || 'The local funding simulation could not run.');
+    }
+    const response = this.receiveFundingEvent({ idempotencyKey: key, event });
+    this.store.transaction((data) => { data.idempotency[key] = { intentId, requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
+    return response;
+  }
+
+  reconcileFundingReference(providerReference) {
+    if (typeof providerReference !== 'string' || !providerReference.trim()) throw new SandboxDomainError(400, 'PROVIDER_REFERENCE_REQUIRED', 'Provide a funding provider reference to reconcile.');
+    const intent = Object.values(this.store.data.fundingIntents).find((candidate) => candidate.providerReference === providerReference);
+    if (!intent) throw new SandboxDomainError(404, 'PROVIDER_REFERENCE_NOT_FOUND', 'The funding provider reference does not match a persisted intent.');
+    this._expireFundingIntents();
+    let status;
+    try {
+      status = this.fundingProvider.reconcileReference({ intent: this.getFundingIntent(intent.id), providerReference });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'FUNDING_RECONCILIATION_FAILED', error.message || 'The funding reference could not be reconciled.');
+    }
+    return { statusCode: 200, body: { intent: safeFundingIntent(this.getFundingIntent(intent.id)), status: { providerReference: safeReference(status.providerReference), status: status.status, asset: status.asset, network: status.network, amountMinor: status.amountMinor, confirmationEvidence: safeFundingEvidence(status.confirmationEvidence), failureReason: status.failureReason || null }, funding: this.getFundingProjection() }, replayed: false };
   }
 
   getCatalog() {
@@ -2092,8 +2565,8 @@ class NaviPaySandboxService {
 
   reset() {
     this.store.reset();
-    seedSandbox(this.store);
-    return { wallet: this.getWallet(), tasks: [] };
+    seedSandbox(this.store, this.clock);
+    return { wallet: this.getWallet(), tasks: [], funding: this.getFundingProjection() };
   }
 }
 
@@ -2119,6 +2592,8 @@ module.exports = {
   LocalOrderAdapter,
   LocalFulfillmentAdapter,
   LocalDeliveryAdapter,
+  LocalMockKycProvider,
+  LocalMockXsgdFundingProvider,
   TASK_PROJECTION_VERSION,
   projectAuditEvent,
   projectOperation,

@@ -123,6 +123,38 @@ The server supports deterministic local scenarios for integration testing: `insu
 
 `src/store.js` uses version 2 state with an explicit migration from the previous version 1 task/audit store. It persists tasks, progress, operations, wallet transfers, ledger legs, reservations, orders, delivery records, and idempotency responses. JSON writes use a restricted directory, a restricted temporary file, fsync, and atomic rename. A task can therefore be inspected and safely resumed after a process restart.
 
+## XSGD funding and local KYC gate
+
+Funding is a separate provider-neutral seam in `src/funding.js`. The contract is intentionally small: `createFundingIntent`, `getFundingStatus`, `receiveProviderEvent`, and `reconcileReference`. The canonical normalized record contains only `status` (`pending`, `confirmed`, `failed`, `expired`, or `reversed`), provider reference, network, asset, amount in minor units, safe confirmation evidence, expiry, and safe credit references. `LocalMockXsgdFundingProvider` is the default and uses deterministic `mock://` deposit instructions. It makes no network call, creates no blockchain transaction, and never represents a live XSGD provider.
+
+Funding is gated by the provider-neutral KYC seam in `src/kyc.js`. `KycProviderContract` normalizes `getStatus`, `receiveDecision`, and `reconcileReference` to `approved`, `pending`, or `rejected`. `LocalMockKycProvider` is an explicit local decision simulator only. It stores status, decision references, timestamps, and an allowlisted reason code, never identity documents or raw provider payloads. An approved KYC status is required both when creating an intent and immediately before crediting the authoritative fake wallet.
+
+The local demonstration is:
+
+```sh
+# inspect the pending local KYC gate and wallet
+curl -sS http://127.0.0.1:3000/api/funding
+
+# approve the local-only gate - this is not identity verification
+curl -sS -X POST http://127.0.0.1:3000/api/funding/kyc/simulate \\
+  -H 'content-type: application/json' -H 'Idempotency-Key: demo-kyc-approve' \\
+  -H 'X-NaviPay-Local-Simulation: true' -d '{"action":"approve"}'
+
+# create deterministic mock deposit instructions
+curl -sS -X POST http://127.0.0.1:3000/api/funding/intents \\
+  -H 'content-type: application/json' -H 'Idempotency-Key: demo-funding-create' \\
+  -d '{"amount":"25.00"}'
+
+# use the returned intent ID to exercise confirm, fail, expire, or reverse
+curl -sS -X POST http://127.0.0.1:3000/api/funding/intents/FUNDING_ID/simulate \\
+  -H 'content-type: application/json' -H 'Idempotency-Key: demo-funding-confirm' \\
+  -H 'X-NaviPay-Local-Simulation: true' -d '{"action":"confirm"}'
+```
+
+`GET /api/funding` and `GET /api/funding/intents/:id` expose the safe funding projection, including current available fake balance, XSGD, the simulated Avalanche Fuji network, deposit instructions, status, provider reference, confirmation reference, KYC status, and the local-only disclosure. The simulation routes require `X-NaviPay-Local-Simulation: true`. Provider webhook routes (`/api/funding/webhooks` and `/api/funding/kyc/webhooks`) require that header for the local provider or a server-side `NAVIPAY_FUNDING_WEBHOOK_SECRET`; no default secret is shipped. Duplicate event IDs and idempotency keys are persisted, and confirmed funding adds exactly one pair of `funding` ledger legs. A reversal adds exactly one pair of `funding_reversal` legs. Failure and expiry add no credit.
+
+A future StraitsX and Avalanche implementation must not be inferred from this mock. Before enabling one, obtain official provider documentation and credentials for the exact following fields: intent creation endpoint and authentication scheme; supported XSGD asset identifier and decimal precision; Avalanche network and chain ID; destination or custody model and whether a memo/tag is required; exact amount and fee semantics; provider reference format; status and terminal-state mapping; confirmation-count or finality policy; webhook endpoint, signature algorithm, timestamp/replay rules, event IDs, and delivery retry semantics; reference reconciliation endpoint; expiry, failure, reversal, settlement, limits, KYC/AML, and refund behavior. The KYC adapter additionally requires the official verification decision states, decision/reference schema, document handling and retention rules, webhook signature, manual-review transitions, sanctions/AML prerequisites, and approved account or customer identifier semantics. NaviPay currently has no live endpoint, custody, KYC, settlement, or provider authentication implementation. Future credentials must be injected server-side through environment or deployment configuration such as `NAVIPAY_FUNDING_WEBHOOK_SECRET`; never put keys in task state, browser code, fixtures, or tests.
+
 ## Future organizer adapters
 
 The local adapters are intentionally narrow replacement points. A future approved organizer integration can implement the canonical methods in `src/sandbox.js` for discovery, funding lookup, inventory reservation, wallet transfer, merchant credit, order, fulfillment, or delivery. Normalize provider status, timeout, and reference data inside that adapter, keep credentials in the provider process, and preserve the server-owned operation IDs, exact quote, inventory-before-payment invariant, idempotency, compensation, and redacted browser contract. The local fixtures remain the default until an approved provider contract and credentials exist. Adapters must return normalized facts to the service; projection builders are the only boundary used by browser read APIs.

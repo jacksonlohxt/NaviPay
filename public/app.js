@@ -1,4 +1,4 @@
-const state = { tasks: [], task: null, projection: null, discovery: null, wallet: null, ledger: [], audit: [], busy: false, error: null, targetSite: '' };
+const state = { tasks: [], task: null, projection: null, discovery: null, wallet: null, funding: null, ledger: [], audit: [], busy: false, error: null, targetSite: '' };
 const app = document.querySelector('#app');
 
 function escapeHtml(value) {
@@ -54,20 +54,23 @@ const statusLabels = {
   reconciliation_required: 'Needs confirmation',
   awaiting_selection: 'Needs a choice',
   pending: 'In progress',
+  expired: 'Expired',
   compensated: 'Reversed',
   refunded: 'Refunded',
   reversed: 'Reversed',
   retired: 'Card retired',
   captured: 'Captured',
   active: 'Issued',
+  approved: 'Approved',
+  rejected: 'Rejected',
   not_issued: 'Not issued',
   not_started: 'Not started'
 };
 
 function statusTone(value) {
-  if (['completed', 'confirmed', 'delivered', 'fulfilled', 'reserved', 'committed', 'authorized', 'retired', 'captured', 'active', 'refunded', 'reversed'].includes(value)) return 'success';
-  if (['failed', 'declined', 'out_of_stock'].includes(value)) return 'danger';
-  if (['unknown', 'reconciliation_required', 'awaiting_selection', 'pending'].includes(value)) return 'warning';
+  if (['completed', 'confirmed', 'delivered', 'fulfilled', 'reserved', 'committed', 'authorized', 'retired', 'captured', 'active', 'approved', 'refunded', 'reversed'].includes(value)) return 'success';
+  if (['failed', 'declined', 'rejected', 'out_of_stock'].includes(value)) return 'danger';
+  if (['unknown', 'reconciliation_required', 'awaiting_selection', 'pending', 'expired'].includes(value)) return 'warning';
   return 'neutral';
 }
 
@@ -172,6 +175,24 @@ function balanceSummary(task) {
   return `<section class="panel balance-panel"><div class="panel-heading"><div><span class="overline">Fake wallet</span><h2>Your balance</h2></div><span class="fixture-chip">NO REAL FUNDS</span></div><div class="balance-grid">${dataCell('Wallet before', formatMoney(starting, currency), 'Before this purchase')}${dataCell('After payment', afterPayment == null ? 'Not charged' : formatMoney(afterPayment, currency), afterPayment == null ? 'No confirmed debit' : 'After the debit')}${dataCell('Final balance', formatMoney(finalBalance, currency), financial.outcome === 'compensated' ? 'After compensation' : 'Current spendable balance')}</div></section>`;
 }
 
+function fundingPanel() {
+  const funding = state.funding || {};
+  const kyc = funding.kyc || { status: 'pending' };
+  const latest = funding.intents?.[0] || null;
+  const approved = kyc.status === 'approved';
+  const kycControls = kyc.status === 'approved'
+    ? '<button type="button" class="quiet-button" data-kyc-action="pending">Simulate re-review</button><button type="button" class="quiet-button" data-kyc-action="reject">Simulate rejection</button>'
+    : kyc.status === 'rejected'
+      ? '<button type="button" class="secondary-button" data-kyc-action="approve">Approve local gate</button>'
+      : '<button type="button" class="secondary-button" data-kyc-action="approve">Approve local gate</button><button type="button" class="quiet-button" data-kyc-action="reject">Reject local gate</button>';
+  let simulationControls = '';
+  if (latest?.status === 'pending') simulationControls = '<div class="choice-actions"><button type="button" class="secondary-button" data-funding-action="confirm">Confirm deposit</button><button type="button" class="quiet-button" data-funding-action="fail">Simulate failure</button><button type="button" class="quiet-button" data-funding-action="expire">Expire intent</button></div>';
+  if (latest?.status === 'confirmed') simulationControls = '<div class="choice-actions"><button type="button" class="quiet-button" data-funding-action="reverse">Simulate reversal</button></div>';
+  const evidence = latest?.confirmationEvidence;
+  const latestDetails = latest ? `<div class="funding-intent"><div class="panel-heading"><div><span class="overline">Latest deposit intent</span><strong>${escapeHtml(latest.amount)}</strong></div>${statusPill(latest.status)}</div><div class="funding-instructions">${dataCell('Mock destination', latest.depositInstructions?.destination || 'Not available', 'Not a wallet or blockchain address')}${dataCell('Memo', latest.depositInstructions?.memo || 'Not available', 'Use only in this local simulation')}${dataCell('Provider reference', shortId(latest.providerReference), 'Safe reference')}${dataCell('Confirmation reference', evidence?.transactionReference || 'Pending', evidence ? 'Mock evidence only' : 'No confirmation yet')}</div>${simulationControls}${latest.status === 'pending' ? `<small class="funding-expiry">Intent expires ${formatDate(latest.expiresAt)}.</small>` : ''}${latest.failureReason ? `<p class="funding-reason">${escapeHtml(latest.failureReason)}</p>` : ''}</div>` : '<p class="advanced-help">Create a local deposit intent after the mock KYC gate is approved.</p>';
+  return `<section class="panel funding-panel"><div class="panel-heading"><div><span class="overline">XSGD funding</span><h2>Fund the fake wallet</h2></div><span class="fixture-chip">LOCAL MOCK</span></div><div class="funding-overview">${dataCell('Available balance', formatMoney(funding.availableBalanceMinor, funding.asset || 'XSGD'), 'Authoritative fake wallet')}${dataCell('Asset / network', `${funding.asset || 'XSGD'} · ${funding.network || 'Avalanche Fuji'}`, 'Local fixture')}</div><div class="funding-gate"><div><span class="product-label">KYC gate</span><strong>${statusPill(kyc.status)} <span>${escapeHtml(kyc.providerReference ? `Reference ${shortId(kyc.providerReference)}` : 'Safe status only')}</span></strong><small>${escapeHtml(kyc.reasonCode || 'Approval is required before an XSGD intent can be created or credited.')}</small></div><div class="choice-actions">${kycControls}</div></div><form id="funding-form" novalidate><label for="funding-amount">Deposit amount</label><div class="funding-form-row"><input id="funding-amount" name="amount" type="text" inputmode="decimal" pattern="[0-9]+(\\.[0-9]{1,2})?" placeholder="25.00" value="25.00"${!approved || state.busy ? ' disabled' : ''}><button type="submit" class="secondary-button"${!approved || state.busy ? ' disabled' : ''}>Create deposit intent</button></div><small class="funding-disclosure">${escapeHtml(funding.disclosure || 'LOCAL SIMULATION ONLY - no real funds or blockchain activity.')}</small></form>${latestDetails}</section>`;
+}
+
 function commerceStatus(task) {
   const purchase = task.state === 'failed' ? 'failed' : task.state === 'reconciliation_required' ? 'reconciliation_required' : task.state === 'awaiting_selection' ? 'awaiting_selection' : task.purchaseStatus || task.state;
   const payment = task.payment?.status || 'pending';
@@ -268,11 +289,11 @@ function render() {
   const task = state.task;
   app.setAttribute('aria-busy', state.busy ? 'true' : 'false');
   if (!task) {
-    app.innerHTML = `${requestCard()}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
+    app.innerHTML = `${requestCard()}${fundingPanel()}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
     bindEvents();
     return;
   }
-  app.innerHTML = `${requestCard()}${outcome(task)}${currentRun(task)}<p class="footer-note">NaviPay is a local-only simulation. No real money, products, or deliveries are involved.</p>`;
+  app.innerHTML = `${requestCard()}${fundingPanel()}${outcome(task)}${currentRun(task)}<p class="footer-note">NaviPay is a local-only simulation. No real money, products, deliveries, or funding are involved.</p>`;
   bindEvents();
 }
 
@@ -297,6 +318,7 @@ async function refresh() {
   const payload = await api('/api/tasks');
   state.tasks = payload.tasks || [];
   state.wallet = payload.wallet || null;
+  state.funding = payload.funding || state.funding;
   state.discovery = payload.discovery || state.discovery;
   const projections = payload.projections || [];
   if (state.task) {
@@ -388,6 +410,65 @@ async function reconcilePayment(resolution) {
   }
 }
 
+async function createFunding(event) {
+  event.preventDefault();
+  if (state.busy) return;
+  const amount = event.currentTarget.elements.amount.value.trim();
+  if (!amount) {
+    state.error = { message: 'Enter an XSGD amount first.' };
+    render();
+    return;
+  }
+  state.busy = true;
+  state.error = null;
+  render();
+  try {
+    const payload = await api('/api/funding/intents', { method: 'POST', headers: { 'Idempotency-Key': `funding-${runKey()}` }, body: JSON.stringify({ amount }) });
+    state.funding = payload.funding || state.funding;
+    await refresh();
+  } catch (error) {
+    state.error = { code: error.code, message: error.message };
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function simulateFunding(action) {
+  if (state.busy || !state.funding?.intents?.[0]) return;
+  state.busy = true;
+  state.error = null;
+  render();
+  try {
+    const intentId = state.funding.intents[0].id;
+    const payload = await api(`/api/funding/intents/${encodeURIComponent(intentId)}/simulate`, { method: 'POST', headers: { 'Idempotency-Key': `funding-sim-${runKey()}`, 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify({ action }) });
+    state.funding = payload.funding || state.funding;
+    await refresh();
+  } catch (error) {
+    state.error = { code: error.code, message: error.message };
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function simulateKyc(action) {
+  if (state.busy) return;
+  state.busy = true;
+  state.error = null;
+  render();
+  try {
+    const payload = await api('/api/funding/kyc/simulate', { method: 'POST', headers: { 'Idempotency-Key': `kyc-sim-${runKey()}`, 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify({ action }) });
+    state.funding = payload.funding || state.funding;
+    await refresh();
+  } catch (error) {
+    state.error = { code: error.code, message: error.message };
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 async function selectTask(taskId) {
   if (state.busy || taskId === state.task?.id) return;
   state.busy = true;
@@ -410,6 +491,9 @@ async function selectTask(taskId) {
 
 function bindEvents() {
   document.querySelector('#request-form')?.addEventListener('submit', runPurchase);
+  document.querySelector('#funding-form')?.addEventListener('submit', createFunding);
+  document.querySelectorAll('[data-funding-action]').forEach((button) => button.addEventListener('click', () => simulateFunding(button.dataset.fundingAction)));
+  document.querySelectorAll('[data-kyc-action]').forEach((button) => button.addEventListener('click', () => simulateKyc(button.dataset.kycAction)));
   document.querySelectorAll('[data-candidate-id]').forEach((button) => button.addEventListener('click', () => resumeTask(button.dataset.candidateId)));
   document.querySelectorAll('[data-resolution]').forEach((button) => button.addEventListener('click', () => reconcilePayment(button.dataset.resolution)));
   document.querySelectorAll('[data-task-id]').forEach((button) => button.addEventListener('click', () => selectTask(button.dataset.taskId)));
@@ -420,6 +504,7 @@ async function boot() {
     const payload = await api('/api/tasks');
     state.tasks = payload.tasks || [];
     state.wallet = payload.wallet || null;
+    state.funding = payload.funding || null;
     state.discovery = payload.discovery || null;
     state.task = state.tasks[0] || null;
     state.targetSite = state.task?.targetSite?.url || '';

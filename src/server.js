@@ -5,6 +5,7 @@ const path = require('node:path');
 const { DomainError, NaviPayService } = require('./domain');
 const { NaviPaySandboxService, SandboxDomainError } = require('./sandbox');
 const { JsonStore } = require('./store');
+const { FUNDING_PROVIDER_ID } = require('./funding');
 
 const root = path.resolve(__dirname, '..');
 const publicDirectory = path.join(root, 'public');
@@ -54,6 +55,24 @@ function idempotencyKey(req, fallback) {
   return req.headers['idempotency-key'] || fallback;
 }
 
+function localSimulationAuthorized(req) {
+  return String(req.headers['x-navipay-local-simulation'] || '').toLowerCase() === 'true';
+}
+
+function secretMatches(candidate, configured) {
+  if (!candidate || !configured || typeof candidate !== 'string' || typeof configured !== 'string') return false;
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(configured);
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function authorizeFundingWebhook(service, req, body) {
+  if (secretMatches(req.headers['x-navipay-funding-webhook-secret'], service.fundingWebhookSecret)) return;
+  const providerId = body?.providerId || body?.event?.providerId || FUNDING_PROVIDER_ID;
+  if (providerId === FUNDING_PROVIDER_ID && localSimulationAuthorized(req)) return;
+  throw new SandboxDomainError(403, 'FUNDING_WEBHOOK_UNAUTHORIZED', 'Funding provider events require the configured server-side webhook secret or the explicit local simulation header.');
+}
+
 function makeService() {
   return new NaviPaySandboxService({ store: new JsonStore(dataFile) });
 }
@@ -64,12 +83,63 @@ function routeSandboxApi(service, req, res, url) {
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'reset' && method === 'POST') {
     return readBody(req).then(() => json(res, 200, service.reset()));
   }
+  if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'funding' && method === 'GET') {
+    return json(res, 200, { funding: service.getFundingProjection() });
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'kyc' && method === 'GET') {
+    return json(res, 200, { kyc: service.getKycProjection(), funding: service.getFundingProjection() });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'kyc' && segments[3] === 'simulate' && method === 'POST') {
+    if (!localSimulationAuthorized(req)) throw new SandboxDomainError(403, 'LOCAL_SIMULATION_ONLY', 'This route is reserved for the explicit local KYC simulation path.');
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_KYC_DECISION', 'KYC simulation input must be a JSON object.');
+      const result = service.simulateKycDecision(idempotencyKey(req, null), body.action || body.status, body.reasonCode || body.reason);
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'kyc' && ['webhook', 'webhooks'].includes(segments[3]) && method === 'POST') {
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_KYC_DECISION', 'KYC provider decision must be a JSON object.');
+      authorizeFundingWebhook(service, req, body);
+      const decision = body.decision && typeof body.decision === 'object' && !Array.isArray(body.decision) ? body.decision : body;
+      const result = service.receiveKycDecision({ idempotencyKey: idempotencyKey(req, decision.decisionId || null), decision });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'intents' && method === 'POST') {
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_FUNDING_INTENT', 'Funding intent input must be a JSON object.');
+      const result = service.createFundingIntent({ idempotencyKey: idempotencyKey(req, null), amount: body.amount, amountMinor: body.amountMinor, asset: body.asset, network: body.network, providerId: body.providerId });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'intents' && method === 'GET') {
+    return json(res, 200, { intent: service.getFundingStatus(segments[3]), funding: service.getFundingProjection() });
+  }
+  if (segments.length === 5 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'intents' && segments[4] === 'simulate' && method === 'POST') {
+    if (!localSimulationAuthorized(req)) throw new SandboxDomainError(403, 'LOCAL_SIMULATION_ONLY', 'This route is reserved for the explicit local funding simulation path.');
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_FUNDING_SIMULATION', 'Funding simulation input must be a JSON object.');
+      const action = body.action || body.status;
+      const result = service.simulateFundingIntent(segments[3], idempotencyKey(req, null), action);
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'funding' && ['webhook', 'webhooks'].includes(segments[2]) && method === 'POST') {
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_FUNDING_EVENT', 'Funding provider event must be a JSON object.');
+      authorizeFundingWebhook(service, req, body);
+      const event = body.event && typeof body.event === 'object' && !Array.isArray(body.event) ? body.event : body;
+      const result = service.receiveFundingEvent({ idempotencyKey: idempotencyKey(req, event.eventId || null), event });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'discovery' && method === 'GET') {
     return json(res, 200, { discovery: service.getDiscoveryProjection() });
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
     const tasks = service.listTasks();
-    return json(res, 200, { tasks, projections: tasks.map((task) => service.getTaskProjection(task.id)), wallet: service.getWallet(), discovery: service.getDiscoveryProjection(), mode: 'simulated local sandbox' });
+    return json(res, 200, { tasks, projections: tasks.map((task) => service.getTaskProjection(task.id)), wallet: service.getWallet(), funding: service.getFundingProjection(), discovery: service.getDiscoveryProjection(), mode: 'simulated local sandbox' });
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
     return readBody(req).then((body) => {
