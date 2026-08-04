@@ -117,6 +117,10 @@ button:disabled { cursor: wait; opacity: .62; }
 .data-cell strong { display: block; margin-top: .25rem; overflow-wrap: anywhere; font-size: .86rem; }
 .data-cell small { display: block; margin-top: .2rem; color: var(--muted); font-size: .63rem; }
 .commerce-panel { grid-area: commerce; background: var(--ink); color: white; }
+.card-panel { margin-top: .85rem; background: #e4f2ef; }
+.card-panel .panel-heading { margin-bottom: .75rem; }
+.card-status-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .55rem; }
+.card-status-grid .data-cell { background: rgba(255,255,255,.62); }
 .commerce-panel .overline { color: #a9c7b9; }
 .commerce-panel .panel-heading h2 { color: white; }
 .commerce-grid { grid-template-columns: repeat(5, 1fr); }
@@ -208,7 +212,7 @@ button:disabled { cursor: wait; opacity: .62; }
   .run-heading { align-items: flex-start; flex-direction: column; }
   .product-highlight { grid-template-columns: 1fr; }
   .product-amount { min-width: 0; text-align: left; }
-  .balance-grid, .commerce-grid, .quote-breakdown { grid-template-columns: 1fr; }
+  .balance-grid, .commerce-grid, .quote-breakdown, .card-status-grid { grid-template-columns: 1fr; }
   .progress-track { grid-template-columns: repeat(2, 1fr); }
   .candidate-row { align-items: flex-start; flex-direction: column; }
   .candidate-end { width: 100%; justify-items: start; text-align: left; }

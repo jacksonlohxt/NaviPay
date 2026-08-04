@@ -18,7 +18,14 @@ function emptyState() {
     inventory: {},
     reservations: {},
     orders: {},
-    deliveries: {}
+    deliveries: {},
+    issuerCards: {},
+    issuerAuthorizations: {},
+    issuerCaptures: {},
+    checkoutSessions: {},
+    checkoutWebhooks: [],
+    refunds: {},
+    workerRuns: {}
   };
 }
 
@@ -60,6 +67,13 @@ function validateState(value, filePath = 'store') {
   ensureCollection(state, 'reservations', 'object');
   ensureCollection(state, 'orders', 'object');
   ensureCollection(state, 'deliveries', 'object');
+  ensureCollection(state, 'issuerCards', 'object');
+  ensureCollection(state, 'issuerAuthorizations', 'object');
+  ensureCollection(state, 'issuerCaptures', 'object');
+  ensureCollection(state, 'checkoutSessions', 'object');
+  ensureCollection(state, 'checkoutWebhooks', 'array');
+  ensureCollection(state, 'refunds', 'object');
+  ensureCollection(state, 'workerRuns', 'object');
   return state;
 }
 

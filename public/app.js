@@ -55,11 +55,17 @@ const statusLabels = {
   awaiting_selection: 'Needs a choice',
   pending: 'In progress',
   compensated: 'Reversed',
+  refunded: 'Refunded',
+  reversed: 'Reversed',
+  retired: 'Card retired',
+  captured: 'Captured',
+  active: 'Issued',
+  not_issued: 'Not issued',
   not_started: 'Not started'
 };
 
 function statusTone(value) {
-  if (['completed', 'confirmed', 'delivered', 'fulfilled', 'reserved', 'committed', 'authorized'].includes(value)) return 'success';
+  if (['completed', 'confirmed', 'delivered', 'fulfilled', 'reserved', 'committed', 'authorized', 'retired', 'captured', 'active', 'refunded', 'reversed'].includes(value)) return 'success';
   if (['failed', 'declined', 'out_of_stock'].includes(value)) return 'danger';
   if (['unknown', 'reconciliation_required', 'awaiting_selection', 'pending'].includes(value)) return 'warning';
   return 'neutral';
@@ -176,6 +182,16 @@ function commerceStatus(task) {
   return `<section class="panel commerce-panel"><div class="panel-heading"><div><span class="overline">At a glance</span><h2>Where things stand</h2></div>${statusPill(purchase)}</div><div class="commerce-grid">${dataCell('Inventory', statusLabels[inventory] || inventory)}${dataCell('Payment', statusLabels[payment] || payment)}${dataCell('Order', statusLabels[order] || order)}${dataCell('Fulfillment', statusLabels[fulfillment] || fulfillment)}${dataCell('Delivery', statusLabels[delivery] || delivery)}</div></section>`;
 }
 
+function cardStatus(task) {
+  const projection = state.projection || {};
+  const card = projection.card || task.card;
+  const checkout = projection.checkout || task.checkout;
+  if (!card || card.status === 'not_issued') return '';
+  const safeReferenceValue = card.maskedReference || card.reference || 'Safe reference pending';
+  const checkoutLabel = checkout?.status === 'authorized' ? 'Checkout captured' : checkout?.status === 'unknown' ? 'Authorization needs confirmation' : checkout?.status === 'declined' ? 'Checkout declined' : 'Checkout in progress';
+  return `<section class="panel card-panel"><div class="panel-heading"><div><span class="overline">Disposable card</span><h2>Disposable card issued</h2></div>${statusPill(card.status)}</div><div class="card-status-grid">${dataCell('Safe last four / reference', safeReferenceValue, 'Credential never shown')}${dataCell('Checkout', checkoutLabel, checkout?.checkoutReference ? `Checkout ${shortId(checkout.checkoutReference)}` : 'Fresh isolated checkout context')}${dataCell('Authorization', checkout?.authorizationReference || 'Pending', 'Issuer reference only')}${dataCell('Capture', checkout?.captureReference || 'Pending', card.status === 'retired' ? 'Card retired after one capture' : 'One capture maximum')}</div></section>`;
+}
+
 const progressBands = [
   { label: 'Find an item', stages: ['intent', 'discovery', 'quote'] },
   { label: 'Pay', stages: ['inventory', 'funding', 'payment', 'merchant_credit'] },
@@ -236,7 +252,7 @@ function auditDetails() {
 function advancedDetails(task) {
   const open = ['awaiting_selection', 'reconciliation_required'].includes(task.state) ? ' open' : '';
   const paymentUnknown = task.state === 'reconciliation_required' && task.payment?.status === 'unknown';
-  return `<details class="advanced-details"${open}><summary>Advanced details <span>References, safeguards, and activity</span></summary><div class="advanced-content">${candidateDetails(task)}${paymentUnknown ? `<div class="advanced-block attention-block"><h3>Confirm the payment result</h3><p class="advanced-help">NaviPay will not try the payment again. Tell us whether the fake wallet approved or declined it.</p><div class="choice-actions"><button type="button" class="secondary-button" data-resolution="authorized">Payment was approved</button><button type="button" class="quiet-button" data-resolution="declined">Payment was declined</button></div></div>` : ''}<div class="advanced-block"><h3>Run information</h3><dl class="detail-list">${detailValue('Request interpretation', task.request?.intent?.productCategory || 'Not detected')}${detailValue('Run state', task.state)}${detailValue('Automation', task.automation?.status || 'Not started')}${detailValue('Next action', task.automation?.nextAction || 'None')}${task.failure ? detailValue('Recorded issue', `${task.failure.code}: ${task.failure.message}`) : ''}${detailValue('Task reference', shortId(task.id))}</dl></div><div class="advanced-block"><h3>Purchase evidence</h3><dl class="detail-list">${detailValue('Discovery source', discoveryView(task).label || 'Not available')}${detailValue('Product SKU', task.quote?.lockedSnapshot?.sku || 'Not selected')}${detailValue('Variant', task.quote?.lockedSnapshot?.variantId || 'Not selected')}${detailValue('Inventory reservation', task.inventory?.reservation?.reference || 'None')}${detailValue('Payment reference', task.payment?.reference || 'None')}${detailValue('Ledger transaction', task.payment?.transactionReference || 'None')}${detailValue('Order reference', task.order?.reference || 'None')}${detailValue('Delivery reference', task.delivery?.trackingReference || 'None')}${detailValue('Chain evidence', task.funding?.transactionReference || 'None')}${detailValue('Receipt reference', task.receipt?.id || 'None')}</dl></div><div class="advanced-block"><h3>Ledger legs</h3>${ledgerDetails(task)}</div><div class="advanced-block"><h3>Activity trail</h3><p class="advanced-help">These records are safe, simulated evidence for checking what happened behind the purchase.</p>${auditDetails()}</div></div></details>`;
+  return `<details class="advanced-details"${open}><summary>Advanced details <span>References, safeguards, and activity</span></summary><div class="advanced-content">${candidateDetails(task)}${paymentUnknown ? `<div class="advanced-block attention-block"><h3>Confirm the payment result</h3><p class="advanced-help">NaviPay will not try the payment again. Tell us whether the fake wallet approved or declined it.</p><div class="choice-actions"><button type="button" class="secondary-button" data-resolution="authorized">Payment was approved</button><button type="button" class="quiet-button" data-resolution="declined">Payment was declined</button></div></div>` : ''}<div class="advanced-block"><h3>Run information</h3><dl class="detail-list">${detailValue('Request interpretation', task.request?.intent?.productCategory || 'Not detected')}${detailValue('Run state', task.state)}${detailValue('Automation', task.automation?.status || 'Not started')}${detailValue('Next action', task.automation?.nextAction || 'None')}${task.failure ? detailValue('Recorded issue', `${task.failure.code}: ${task.failure.message}`) : ''}${detailValue('Task reference', shortId(task.id))}</dl></div><div class="advanced-block"><h3>Purchase evidence</h3><dl class="detail-list">${detailValue('Discovery source', discoveryView(task).label || 'Not available')}${detailValue('Product SKU', task.quote?.lockedSnapshot?.sku || 'Not selected')}${detailValue('Variant', task.quote?.lockedSnapshot?.variantId || 'Not selected')}${detailValue('Inventory reservation', task.inventory?.reservation?.reference || 'None')}${detailValue('Card reference', task.card?.maskedReference || task.instrument?.maskedReference || 'None')}${detailValue('Card status', task.card?.status || 'Not issued')}${detailValue('Authorization reference', task.checkout?.authorizationReference || 'None')}${detailValue('Capture reference', task.checkout?.captureReference || 'None')}${detailValue('Payment reference', task.payment?.reference || 'None')}${detailValue('Ledger transaction', task.payment?.transactionReference || 'None')}${detailValue('Checkout cleanup', task.checkoutWorker?.cleanup || 'Pending')}${detailValue('Order reference', task.order?.reference || 'None')}${detailValue('Delivery reference', task.delivery?.trackingReference || 'None')}${detailValue('Chain evidence', task.funding?.transactionReference || 'None')}${detailValue('Receipt reference', task.receipt?.id || 'None')}</dl></div><div class="advanced-block"><h3>Ledger legs</h3>${ledgerDetails(task)}</div><div class="advanced-block"><h3>Activity trail</h3><p class="advanced-help">These records are safe, simulated evidence for checking what happened behind the purchase.</p>${auditDetails()}</div></div></details>`;
 }
 
 function historyDetails() {
@@ -245,7 +261,7 @@ function historyDetails() {
 }
 
 function currentRun(task) {
-  return `<div class="run-heading"><div><span class="overline">Current purchase</span><h2>${escapeHtml(task.request.raw)}</h2></div>${modeBadge('FAKE WALLET')}</div><div class="purchase-flow">${productSummary(task)}${balanceSummary(task)}${commerceStatus(task)}${progressPanel(task)}</div>${advancedDetails(task)}${historyDetails()}`;
+  return `<div class="run-heading"><div><span class="overline">Current purchase</span><h2>${escapeHtml(task.request.raw)}</h2></div>${modeBadge('FAKE WALLET')}</div><div class="purchase-flow">${productSummary(task)}${balanceSummary(task)}${commerceStatus(task)}${progressPanel(task)}</div>${cardStatus(task)}${advancedDetails(task)}${historyDetails()}`;
 }
 
 function render() {

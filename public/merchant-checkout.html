@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orchard Electronics - Local checkout fixture</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #123530; background: #f5f1e7; }
+    main { max-width: 760px; margin: 2rem auto; padding: 1.5rem; }
+    section { margin: 1rem 0; padding: 1rem; border: 1px solid #c9d9cd; border-radius: 14px; background: #fffefa; }
+    label { display: block; margin-top: .7rem; font-size: .8rem; font-weight: 700; }
+    input, select { width: 100%; min-height: 2.4rem; margin-top: .25rem; padding: .5rem; box-sizing: border-box; }
+    button { margin-top: 1rem; padding: .7rem 1rem; border: 0; border-radius: 8px; background: #bdf477; color: #123530; font-weight: 800; }
+    .notice { padding: .7rem; border-radius: 9px; background: #d9f1e5; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><p>SIMULATED LOCAL MERCHANT</p><h1>Orchard Electronics checkout</h1><p class="notice">Competition fixture only. This page never connects to a payment network or stores card details.</p></header>
+    <form id="checkout-form">
+      <section aria-labelledby="product-heading"><h2 id="product-heading">Product and cart</h2><p id="product-name">Apple Magic Keyboard</p><label for="quantity">Quantity</label><input id="quantity" name="quantity" type="number" min="1" value="1"><p id="cart-total">XSGD 171.72</p></section>
+      <section aria-labelledby="delivery-heading"><h2 id="delivery-heading">Delivery</h2><label for="name">Recipient</label><input id="name" name="name" autocomplete="name" value="Demo Customer"><label for="address">Delivery address</label><input id="address" name="address" autocomplete="street-address" value="Fixture delivery address"><label for="country">Country</label><select id="country" name="country"><option>Singapore</option></select></section>
+      <section aria-labelledby="card-heading"><h2 id="card-heading">Disposable card</h2><label for="card-number">Card number</label><input id="card-number" name="cardNumber" inputmode="numeric" autocomplete="cc-number" aria-describedby="card-note"><label for="card-expiry">Expiry</label><input id="card-expiry" name="expiry" autocomplete="cc-exp" placeholder="MM/YY"><label for="card-cvv">Security code</label><input id="card-cvv" name="cvv" inputmode="numeric" autocomplete="cc-csc"><p id="card-note">Injected only by the isolated local checkout capability. It is not sent to the NaviPay browser UI.</p></section>
+      <button type="submit">Pay XSGD 171.72</button>
+      <p id="result" role="status" aria-live="polite"></p>
+    </form>
+    <script>document.querySelector('#checkout-form').addEventListener('submit', (event) => { event.preventDefault(); document.querySelector('#result').textContent = 'This fixture page is read-only. The local gateway owns simulated capture outcomes.'; });</script>
+  </main>
+</body>
+</html>

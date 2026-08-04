@@ -75,7 +75,7 @@ function routeSandboxApi(service, req, res, url) {
     return readBody(req).then((body) => {
       const input = body || {};
       if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_TASK_REQUEST', 'Task request must be a JSON object.');
-      const task = service.createTask({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy' });
+      const task = service.createTask({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', paymentMode: input.paymentMode || 'issuer_authorization' });
       return json(res, 201, { task, projection: service.getTaskProjection(task.id) });
     });
   }
@@ -84,7 +84,7 @@ function routeSandboxApi(service, req, res, url) {
       const input = body || {};
       if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_PURCHASE_RUN', 'Purchase run input must be a JSON object.');
       const fallback = `sandbox-browser-${crypto.createHash('sha256').update(JSON.stringify({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy' })).digest('hex')}`;
-      const result = service.startPurchase({ idempotencyKey: idempotencyKey(req, fallback), request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', origin: input.origin || 'operator' });
+      const result = service.startPurchase({ idempotencyKey: idempotencyKey(req, fallback), request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', origin: input.origin || 'operator', paymentMode: input.paymentMode || 'issuer_authorization' });
       return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
     });
   }
@@ -114,12 +114,37 @@ function routeSandboxApi(service, req, res, url) {
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'catalog' && method === 'GET') {
     return json(res, 200, { catalog: service.getCatalog() });
   }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'cards' && method === 'GET') {
+    return json(res, 200, { card: service.getCardStatus(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'checkout' && segments[2] === 'sessions' && method === 'GET') {
+    return json(res, 200, { session: service.getCheckoutSession(segments[3]) });
+  }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'checkout' && segments[2] === 'webhooks' && method === 'GET') {
+    return json(res, 200, { webhooks: service.getCheckoutWebhooks(url.searchParams.get('sessionId')) });
+  }
   if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'operations' && method === 'GET') {
     return json(res, 200, { operation: service.lookupOperation(segments[2]), walletTransfer: service.lookupWalletTransfer(segments[2]) });
   }
   if (segments.length === 5 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'payment' && segments[4] === 'reconcile' && method === 'POST') {
     return readBody(req).then((body) => {
       const result = service.reconcilePayment(segments[2], idempotencyKey(req, `sandbox-reconcile-${segments[2]}`), body?.resolution);
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 5 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'payment' && ['refund', 'reverse'].includes(segments[4]) && method === 'POST') {
+    return readBody(req).then(() => {
+      const action = segments[4] === 'reverse' ? 'reversal' : 'refund';
+      const result = service.refundPayment(segments[2], idempotencyKey(req, `sandbox-${action}-${segments[2]}`), action);
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'card' && method === 'GET') {
+    return json(res, 200, { card: service.getCardStatus(service.getTask(segments[2]).card?.cardId) });
+  }
+  if (segments.length === 5 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'card' && segments[4] === 'revoke' && method === 'POST') {
+    return readBody(req).then((body) => {
+      const result = service.revokeCard(segments[2], idempotencyKey(req, `sandbox-revoke-card-${segments[2]}`), body?.reason || 'operator');
       return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
     });
   }
@@ -248,7 +273,7 @@ function routeApi(service, req, res, url) {
 }
 
 function staticFile(res, pathname) {
-  const requested = pathname === '/' ? '/index.html' : pathname;
+  const requested = pathname === '/' ? '/index.html' : ['/merchant-checkout/', '/checkout/'].includes(pathname) ? '/merchant-checkout.html' : pathname;
   const filePath = path.resolve(publicDirectory, `.${requested}`);
   if (!filePath.startsWith(`${publicDirectory}${path.sep}`)) return false;
   const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };

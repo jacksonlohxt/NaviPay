@@ -28,14 +28,36 @@ npm run check
 4. See the outcome at a glance: the interpreted request, selected merchant and rationale, quote breakdown, wallet before/after-payment/final balance, inventory, payment, order, fulfillment, delivery, and receipt status.
 5. NaviPay pauses only for a genuine tie or ambiguity, malformed/stale/blocked discovery, no available or over-cap item, insufficient fake funds, an unknown payment result, or another safety exception. **Advanced details** explains the issue and available action. Technical references, ledger legs, operations, chain evidence, and the safe activity timeline stay expandable.
 
-The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00.
+The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00. Issuer authorization and capture are the only default purchase debit path. The fake issuer is funded by that wallet, and the direct wallet transfer path exists only for explicit legacy test mode.
+
+## Competition issuance and checkout demonstration
+
+This is the exact local-only demonstration for the approved issuance and execution milestones. Every card, gateway, merchant response, webhook, order, and delivery result below is simulated. No PAN, CVV, merchant credential, or real payment network is used. Airwallex is reserved for a future Singapore/SGD pilot and StraitsX for future exact-XSGD diligence; neither is a current dependency.
+
+1. Start NaviPay with `npm start`, open <http://127.0.0.1:3000>, and leave the target site blank so the seeded merchant catalog is the authoritative local source.
+2. Enter `Find an Apple Magic Keyboard` and press **Discover and purchase**. NaviPay reserves one unit before payment, verifies the seeded fake wallet, issues a disposable one-use card scoped to Orchard Electronics, XSGD 171.72, and MCC 5732, and starts a fresh bounded checkout worker profile.
+3. Observe **Disposable card issued**, the safe masked reference, checkout submission, issuer authorization and capture references, **Card retired**, the confirmed order, delivery, and final receipt. The card credential is injected only inside the isolated checkout capability and never appears in the task, projection, audit, worker record, log, or browser UI.
+4. Repeat the same flow through the API to inspect the safe contract:
+
+   ```sh
+   curl -sS -X POST http://127.0.0.1:3000/api/purchases/run \
+     -H 'content-type: application/json' -H 'Idempotency-Key: competition-success' \
+     -d '{"request":"Find an Apple Magic Keyboard"}'
+   ```
+
+   The response contains only card status and masked reference, issuer authorization and capture references, order, delivery, receipt, redacted evidence, and the persisted lifecycle. It contains no card credential or raw merchant payload.
+5. Use API scenario fixtures to replay safe execution outcomes: `decline`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `browser-crash`, and `duplicate`. For `unknown` or `timeout`, call `POST /api/tasks/:id/payment/reconcile` with `{"resolution":"authorized"}` or `{"resolution":"declined"}`. NaviPay never retries an unknown capture. For a confirmed task, `POST /api/tasks/:id/payment/refund` and `/payment/reverse` exercise the simulated refund and reversal webhook fixtures.
+6. Open <http://127.0.0.1:3000/merchant-checkout/> to inspect the purpose-built local merchant checkout page. Its product, cart, delivery, and card fields are a fixture only. Discovery remains read-only and cannot invoke this checkout worker or gateway.
+
+The local checkout worker records only a fresh profile identifier, approved local origin, bounded action metadata, and cleanup status in persisted state. The issuer lifecycle persists issue, status, authorize, capture, reconcile, retire, revoke, expiry, scope, stable operation IDs, and idempotency records while keeping the disposable credential in an isolated in-memory capability.
 
 ## Local fake environments
 
 - **Merchant catalog**: `CATALOG` in `src/sandbox.js` contains merchant IDs, local merchant domains, SKUs, variant IDs, prices, tax and shipping, quantities, and product categories for keyboards, mice, and earphones. It remains the reliable default and test oracle.
 - **Inventory**: `LocalInventoryAdapter` supports one-unit stock leases with expiry, reserve, commit, release, out-of-stock handling, and idempotent operation references. Reservation happens before any wallet debit.
 - **Wallet**: `LocalWalletTransferAdapter` operates on the seeded wallet and writes an atomic double-entry ledger. A transfer has a wallet debit and merchant credit leg, a stable operation reference, replay lookup, insufficient-funds handling, decline handling, unknown-result handling, and compensation support. The wallet balance is the spendable source. It is not inferred from chain evidence.
-- **Merchant credit**: `LocalMerchantCreditAdapter` confirms that the ledger credit reached the selected merchant before order creation.
+- **Issuer and checkout**: `src/issuer.js` persists the fake issuer card lifecycle and `src/checkout-worker.js` creates a fresh bounded profile per task. `LocalMerchantCheckoutAdapter` submits product, cart, delivery, and isolated card data to the local gateway, which authorizes and captures through the issuer. The issuer capture performs the single fake-wallet debit.
+- **Merchant credit**: `LocalMerchantCreditAdapter` confirms that the ledger credit reached the selected merchant before order creation. It is bookkeeping after issuer capture, not a second debit.
 - **Order**: `LocalOrderAdapter` creates an idempotent order only after confirmed payment and committed inventory.
 - **Fulfillment and delivery**: `LocalFulfillmentAdapter` and `LocalDeliveryAdapter` write independent statuses. A delivery failure leaves the confirmed payment, merchant credit, order, and receipt confirmed.
 
@@ -75,8 +97,9 @@ Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaym
 
 - `POST /api/purchases/run` with `{ "request": "I want a mouse" }` runs the complete bounded lifecycle. Send an `Idempotency-Key` header.
 - `POST /api/tasks/:id/run` resumes a run waiting for an explicit candidate selection after a genuine ambiguity or tie.
-- `POST /api/tasks/:id/payment/reconcile` with `{ "resolution": "authorized" }` or `{ "resolution": "declined" }` resolves an unknown wallet result without retrying the transfer.
-- `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/receipt`, and `GET /api/tasks/:id/audit` expose persisted safe views.
+- `POST /api/tasks/:id/payment/reconcile` with `{ "resolution": "authorized" }` or `{ "resolution": "declined" }` resolves an unknown issuer capture without retrying checkout or the transfer.
+- `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/receipt`, `GET /api/tasks/:id/audit`, and `GET /api/tasks/:id/card` expose persisted safe views.
+- `GET /api/cards/:cardId`, `GET /api/checkout/sessions/:sessionId`, and `GET /api/checkout/webhooks` expose only safe issuer and local gateway status fixtures. `POST /api/tasks/:id/payment/refund` and `/payment/reverse` are idempotent simulated post-capture actions.
 - `GET /api/wallet` exposes the seeded fake balance and ledger evidence. `GET /api/catalog` exposes safe catalog and stock facts.
 - `POST /api/reset` clears local purchase history and restores the seeded wallet and inventory.
 
@@ -88,7 +111,7 @@ The server entrypoint is `src/server.js`. The product orchestration and adapter 
 
 ## Recovery scenarios
 
-The server supports deterministic local scenarios for integration testing: `insufficient-funds`, `payment-decline`, `unknown-payment`, `order-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
+The server supports deterministic local scenarios for integration testing: `insufficient-funds`, `payment-decline`, `decline`, `unknown-payment`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `duplicate`, `browser-crash`, `order-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
 
 - Insufficient funds and payment decline release the reservation and create no ledger entries.
 - Unknown payment holds the reservation and blocks retries. Reconciliation either applies the one idempotent transfer or releases the reservation.
