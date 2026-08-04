@@ -3,18 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#122d2a">
+  <meta name="theme-color" content="#123530">
   <meta name="description" content="NaviPay calm, local simulated purchasing.">
-  <title>NaviPay - simple simulated purchasing</title>
+  <title>NaviPay - local simulated purchase</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="NaviPay home"><span class="brand-mark">N</span><span><strong>NaviPay</strong><small>local commerce sandbox</small></span></a>
-      <div class="topbar-right"><span class="mode-badge mode-badge-dark"><span class="mode-dot"></span> SIMULATED ONLY</span><span class="topbar-note">No real funds, inventory, or delivery</span></div>
+      <a class="brand" href="/" aria-label="NaviPay home"><span class="brand-mark">N</span><span><strong>NaviPay</strong><small>local purchase sandbox</small></span></a>
+      <div id="topbar-controls" class="topbar-controls"><span class="mode-badge mode-badge-dark"><span class="mode-dot"></span>SIMULATED ONLY</span></div>
     </header>
-    <main id="app" class="main-content"><section class="loading-state" aria-live="polite"><span class="spinner"></span> Loading sandbox…</section></main>
+    <main id="app" class="main-content"><section class="loading-state" aria-live="polite"><span class="spinner" aria-hidden="true"></span> Loading sandbox…</section></main>
   </div>
   <script src="/app.js" defer></script>
 </body>
