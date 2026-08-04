@@ -96,6 +96,7 @@ class LocalMockXsgdFundingProvider extends FundingProviderContract {
     this.clock = clock;
     this.calls = { create: 0, status: 0, event: 0, reconcile: 0 };
     this.providerId = FUNDING_PROVIDER_ID;
+    this.providerMode = 'local_mock';
   }
 
   _validateAssetNetwork({ asset, network }) {

@@ -6,6 +6,7 @@ const { DomainError, NaviPayService } = require('./domain');
 const { NaviPaySandboxService, SandboxDomainError } = require('./sandbox');
 const { JsonStore } = require('./store');
 const { FUNDING_PROVIDER_ID } = require('./funding');
+const { KYC_PROVIDER_ID } = require('./kyc');
 
 const root = path.resolve(__dirname, '..');
 const publicDirectory = path.join(root, 'public');
@@ -56,7 +57,7 @@ function idempotencyKey(req, fallback) {
 }
 
 function localSimulationAuthorized(req) {
-  return String(req.headers['x-navipay-local-simulation'] || '').toLowerCase() === 'true';
+  return req.headers['x-navipay-local-simulation'] === 'true';
 }
 
 function secretMatches(candidate, configured) {
@@ -66,11 +67,31 @@ function secretMatches(candidate, configured) {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
+function providerIdFromPayload(body, nestedKey) {
+  const nested = body?.[nestedKey];
+  if (body && Object.prototype.hasOwnProperty.call(body, 'providerId')) return body.providerId;
+  return nested && typeof nested === 'object' && !Array.isArray(nested) ? nested.providerId : null;
+}
+
 function authorizeFundingWebhook(service, req, body) {
+  const expectedProviderId = service.fundingProvider?.providerId || FUNDING_PROVIDER_ID;
+  const providerId = providerIdFromPayload(body, 'event');
+  if (!providerId) throw new SandboxDomainError(403, 'FUNDING_PROVIDER_ID_REQUIRED', 'Funding provider events must identify the configured funding provider.');
+  if (providerId !== expectedProviderId) throw new SandboxDomainError(403, 'FUNDING_PROVIDER_MISMATCH', 'The funding event provider does not match the configured funding provider.');
   if (secretMatches(req.headers['x-navipay-funding-webhook-secret'], service.fundingWebhookSecret)) return;
-  const providerId = body?.providerId || body?.event?.providerId || FUNDING_PROVIDER_ID;
-  if (providerId === FUNDING_PROVIDER_ID && localSimulationAuthorized(req)) return;
+  if (providerId === FUNDING_PROVIDER_ID && (service.fundingProvider?.providerMode || 'local_mock') === 'local_mock' && localSimulationAuthorized(req)) return;
   throw new SandboxDomainError(403, 'FUNDING_WEBHOOK_UNAUTHORIZED', 'Funding provider events require the configured server-side webhook secret or the explicit local simulation header.');
+}
+
+function authorizeKycWebhook(service, req, body) {
+  const expectedProviderId = service.kycProvider?.providerId || KYC_PROVIDER_ID;
+  const providerId = providerIdFromPayload(body, 'decision');
+  if (!providerId) throw new SandboxDomainError(403, 'KYC_PROVIDER_ID_REQUIRED', 'KYC provider decisions must identify the configured KYC provider.');
+  if (providerId !== expectedProviderId) throw new SandboxDomainError(403, 'KYC_PROVIDER_MISMATCH', 'The KYC decision provider does not match the configured KYC provider.');
+  if (secretMatches(req.headers['x-navipay-kyc-webhook-secret'], service.kycWebhookSecret)
+    || secretMatches(req.headers['x-navipay-funding-webhook-secret'], service.fundingWebhookSecret)) return;
+  if (providerId === KYC_PROVIDER_ID && service.kycProvider?.providerMode === 'local_mock' && localSimulationAuthorized(req)) return;
+  throw new SandboxDomainError(403, 'KYC_WEBHOOK_UNAUTHORIZED', 'KYC provider decisions require the configured server-side webhook secret or the explicit local simulation header.');
 }
 
 function makeService() {
@@ -100,8 +121,9 @@ function routeSandboxApi(service, req, res, url) {
   if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'kyc' && ['webhook', 'webhooks'].includes(segments[3]) && method === 'POST') {
     return readBody(req).then((body) => {
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_KYC_DECISION', 'KYC provider decision must be a JSON object.');
-      authorizeFundingWebhook(service, req, body);
-      const decision = body.decision && typeof body.decision === 'object' && !Array.isArray(body.decision) ? body.decision : body;
+      authorizeKycWebhook(service, req, body);
+      const decisionBody = body.decision && typeof body.decision === 'object' && !Array.isArray(body.decision) ? body.decision : body;
+      const decision = { ...decisionBody, providerId: decisionBody.providerId || body.providerId };
       const result = service.receiveKycDecision({ idempotencyKey: idempotencyKey(req, decision.decisionId || null), decision });
       return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
     });
@@ -129,8 +151,35 @@ function routeSandboxApi(service, req, res, url) {
     return readBody(req).then((body) => {
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_FUNDING_EVENT', 'Funding provider event must be a JSON object.');
       authorizeFundingWebhook(service, req, body);
-      const event = body.event && typeof body.event === 'object' && !Array.isArray(body.event) ? body.event : body;
+      const eventBody = body.event && typeof body.event === 'object' && !Array.isArray(body.event) ? body.event : body;
+      const event = { ...eventBody, providerId: eventBody.providerId || body.providerId };
       const result = service.receiveFundingEvent({ idempotencyKey: idempotencyKey(req, event.eventId || null), event });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length >= 3 && segments[0] === 'api' && segments[1] === 'funding' && method === 'POST'
+    && ((segments[2] === 'reconcile' && segments.length === 3)
+      || (segments[2] === 'references' && segments.length === 5 && segments[4] === 'reconcile'))) {
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_FUNDING_RECONCILIATION', 'Funding reconciliation input must be a JSON object.');
+      const providerReference = segments[2] === 'reconcile' ? body.providerReference : decodeURIComponent(segments[3]);
+      const input = { ...body, providerReference };
+      authorizeFundingWebhook(service, req, input);
+      const key = idempotencyKey(req, `funding-reconcile-${crypto.createHash('sha256').update(providerReference || '').digest('hex')}`);
+      const result = service.reconcileFundingReference({ idempotencyKey: key, providerId: input.providerId, providerReference });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
+  if (segments.length >= 4 && segments[0] === 'api' && segments[1] === 'funding' && segments[2] === 'kyc' && method === 'POST'
+    && ((segments[3] === 'reconcile' && segments.length === 4)
+      || (segments[3] === 'references' && segments.length === 6 && segments[5] === 'reconcile'))) {
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_KYC_RECONCILIATION', 'KYC reconciliation input must be a JSON object.');
+      const providerReference = segments[3] === 'reconcile' ? body.providerReference : decodeURIComponent(segments[4]);
+      const input = { ...body, providerReference };
+      authorizeKycWebhook(service, req, input);
+      const key = idempotencyKey(req, `kyc-reconcile-${crypto.createHash('sha256').update(providerReference || '').digest('hex')}`);
+      const result = service.reconcileKycReference({ idempotencyKey: key, providerId: input.providerId, providerReference });
       return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
     });
   }
