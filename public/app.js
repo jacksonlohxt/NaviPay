@@ -64,7 +64,11 @@ const statusLabels = {
   approved: 'Approved',
   rejected: 'Rejected',
   not_issued: 'Not issued',
-  not_started: 'Not started'
+  not_started: 'Not started',
+  skipped: 'Skipped',
+  no_match: 'No match',
+  over_budget: 'Over budget',
+  low_balance: 'Low balance'
 };
 
 function statusTone(value) {
@@ -85,11 +89,15 @@ function dataCell(label, value, note = '') {
 
 function failureMessage(task) {
   const code = task.failure?.code;
-  if (task.state === 'awaiting_selection') return task.quote?.recommendationOnly ? 'There is no single best browser match. Choose one of the tied results in Advanced details so NaviPay can cross-check the authoritative local quote before purchase.' : 'We found more than one good match. Choose the item you want in Advanced details to continue.';
+  if (task.state === 'awaiting_selection') return task.quote?.recommendationOnly && task.quote?.mode === 'read-only Playwright fixture' ? 'There is no single best browser match. Choose one of the tied results in Advanced details so NaviPay can cross-check the authoritative local quote before purchase.' : 'We found more than one good local match. Choose the item you want in Advanced details to continue.';
   if (task.state === 'reconciliation_required') return 'The payment result is unclear. Nothing will be tried again until you confirm what happened in Advanced details.';
+  if (code === 'NO_LOCAL_MATCHES' || code === 'DISCOVERY_NO_MATCH') return 'No matching local item was found. No inventory was reserved and nothing was charged.';
   if (code === 'INSUFFICIENT_FUNDS') return 'There is not enough fake balance for this purchase. Nothing was charged.';
-  if (code === 'OUT_OF_STOCK') return 'The approved source has no in-stock item for this request. Nothing was charged.';
-  if (code === 'SPENDING_CEILING_EXCEEDED') return 'Every available match is over the task ceiling. Nothing was charged.';
+  if (code === 'OUT_OF_STOCK') return 'The exact requested item is out of stock. NaviPay did not substitute another brand. Nothing was charged.';
+  if (code === 'SPENDING_CEILING_EXCEEDED') return 'Every available match is over the task budget. Nothing was charged.';
+  if (code === 'QUOTE_EXPIRED') return 'The quote expired before payment. Nothing was charged.';
+  if (code === 'ORDER_COMMIT_FAILED' || code === 'INVENTORY_COMMIT_FAILED') return 'Order and inventory confirmation failed safely. Payment was compensated and no confirmed order remains.';
+  if (code === 'AMBIGUOUS_MATCH') return 'More than one exact match needs your choice. No inventory was reserved and nothing was charged.';
   if (code === 'AUTHORITATIVE_QUOTE_MISMATCH') return 'The browser price did not match the approved local quote. Nothing was charged.';
   if (code === 'PAYMENT_DECLINED' || code === 'PAYMENT_DECLINED_RECONCILED') return 'The payment did not go through. Nothing was charged.';
   if (code === 'DELIVERY_FAILED') return 'The purchase is confirmed, but delivery could not be completed.';
@@ -121,7 +129,7 @@ function outcome(task) {
     message = failureMessage(task);
   } else if (task.state === 'awaiting_selection') {
     tone = 'warning';
-    title = task.quote?.recommendationOnly ? 'Recommendation ready' : 'Choose an item to continue';
+    title = task.quote?.recommendationOnly && task.quote?.mode === 'read-only Playwright fixture' ? 'Recommendation ready' : 'Choose an item to continue';
     message = failureMessage(task);
   } else if (task.state === 'failed') {
     tone = 'danger';
@@ -135,7 +143,7 @@ function requestCard() {
   const discovery = state.task ? discoveryView(state.task) : state.discovery || { label: 'Seeded catalog', explanation: 'NaviPay is using its seeded local merchant catalog.' };
   const configuredSite = state.discovery?.configuredSite || { label: 'Seeded catalog is the default' };
   const targetValue = escapeHtml(state.targetSite);
-  return `<section class="request-card"><div class="request-copy"><span class="overline">NaviPay purchase</span><h1>What should we buy?</h1><p>Give NaviPay a plain instruction and an approved commerce site. It will discover a match, then complete the local simulated purchase.</p></div><form id="request-form" novalidate><label for="request-input">Purchase instruction</label><div class="request-row"><input id="request-input" name="request" type="text" maxlength="240" autocomplete="off" placeholder="Find an Apple Magic Keyboard" required><button type="submit" class="run-button"${state.busy ? ' disabled' : ''}>${state.busy ? 'Running…' : 'Discover and purchase'}</button></div><label class="target-label" for="target-site">Target commerce site <span>(optional when configured)</span></label><input id="target-site" name="targetSite" type="url" maxlength="2048" autocomplete="url" value="${targetValue}" placeholder="http://127.0.0.1:43123/competition/"><small>Use the local replay fixture URL, or leave blank to use the configured challenge site. Unapproved sites are never fetched.</small><p class="configured-site"><span>Configured site</span><strong>${escapeHtml(configuredSite.label || 'Not configured')}</strong></p><p class="discovery-config"><span>Discovery status</span>${discoveryBadge(discovery)} ${escapeHtml(discovery.explanation)}</p><p class="form-error" id="request-error" role="alert" hidden></p></form></section>`;
+  return `<section class="request-card"><div class="request-copy"><span class="overline">NaviPay local purchase</span><h1>What should we buy?</h1><p>Start with a plain instruction. NaviPay uses its seeded local merchant catalog and local merchant gateway by default.</p><p class="local-disclosure">Local simulation only: fake wallet, seeded inventory, mock KYC, and fixture delivery. No real funds or credentials.</p></div><form id="request-form" novalidate><label for="request-input">Purchase instruction</label><div class="request-row"><input id="request-input" name="request" type="text" maxlength="240" autocomplete="off" placeholder="Find an Apple Magic Keyboard" required><button type="submit" class="run-button"${state.busy ? ' disabled' : ''}>${state.busy ? 'Running…' : 'Discover and purchase'}</button></div><p class="local-path"><span>Primary path</span><strong>Seeded local catalog and local merchant gateway</strong></p><details class="optional-discovery"><summary>Optional browser evidence <span>read-only and collapsed by default</span></summary><div class="optional-discovery-content"><label class="target-label" for="target-site">Approved target commerce site <span>(optional)</span></label><input id="target-site" name="targetSite" type="url" maxlength="2048" autocomplete="url" value="${targetValue}" placeholder="http://127.0.0.1:43123/competition/"><small>Only an already allowlisted local replay site may be fetched. Discovery cannot reserve inventory, authorize payment, or place an order.</small><p class="configured-site"><span>Configured site</span><strong>${escapeHtml(configuredSite.label || 'Not configured')}</strong></p><p class="discovery-config"><span>Evidence status</span>${discoveryBadge(discovery)} ${escapeHtml(discovery.explanation)}</p></div></details><p class="form-error" id="request-error" role="alert" hidden></p></form></section>`;
 }
 
 function emptyState() {
@@ -153,26 +161,29 @@ function productSummary(task) {
   const amount = task.quote?.totalMinor ?? displayItem?.totalMinor;
   const expectedAmount = Number.isFinite(amount) ? formatMoney(amount, task.currency) : 'Not set';
   const paymentWasMade = task.payment?.status === 'authorized';
+  const paymentUnknown = task.payment?.status === 'unknown';
   const recommendationOnly = Boolean(view.quote?.recommendationOnly || task.quote?.recommendationOnly);
-  const amountSpent = recommendationOnly ? 'Recommendation only' : paymentWasMade ? expectedAmount : task.payment ? formatMoney(0, task.currency) : (Number.isFinite(amount) ? 'Not yet paid' : 'Not set');
-  const amountNote = recommendationOnly ? 'No purchase authority' : paymentWasMade ? 'Confirmed payment' : task.payment ? 'Nothing charged' : 'Expected total';
+  const amountSpent = recommendationOnly ? 'Recommendation only' : paymentWasMade ? expectedAmount : paymentUnknown ? 'Needs confirmation' : task.payment ? formatMoney(0, task.currency) : (Number.isFinite(amount) ? 'Not yet paid' : 'Not set');
+  const amountNote = recommendationOnly ? 'No purchase authority' : paymentWasMade ? 'Confirmed payment' : paymentUnknown ? 'Capture result is unknown' : task.payment ? 'Nothing charged' : 'Expected total';
   const stockNote = displayItem?.variant || (recommendation?.reason || 'NaviPay is looking for a suitable item.');
   const itemLabel = item ? 'Item found' : fallbackItem ? 'Requested item' : 'Item';
   const breakdown = view.quote && Number.isFinite(view.quote.totalMinor) ? `<div class="quote-breakdown" aria-label="Quote breakdown">${dataCell('Subtotal', formatMoney(view.quote.subtotalMinor, view.quote.currency))}${dataCell('Shipping', formatMoney(view.quote.shippingMinor, view.quote.currency))}${dataCell('Tax', formatMoney(view.quote.taxMinor, view.quote.currency))}${dataCell('Total', formatMoney(view.quote.totalMinor, view.quote.currency))}</div>` : '';
   const rationale = displayItem?.matchReasons?.join('; ') || view.recommendation?.reason || recommendation?.reason || 'NaviPay is looking for a suitable item.';
   const receiptNote = view.receipt?.status === 'confirmed' ? `Receipt ${shortId(view.receipt.id)} is ready.` : '';
   const discovery = discoveryView(task);
-  return `<section class="panel product-panel"><div class="panel-heading"><div><span class="overline">${escapeHtml(itemLabel)}</span><h2>${escapeHtml(itemName)}</h2></div>${discoveryBadge(discovery)}</div><div class="discovery-explanation"><strong>${escapeHtml(discovery.label || 'Discovery')}</strong><span>${escapeHtml(discovery.explanation || '')}</span></div><div class="product-highlight"><div><span class="product-label">Merchant</span><strong>${escapeHtml(merchant)}</strong><small>${escapeHtml(stockNote)}</small><small class="selection-reason">Why this item: ${escapeHtml(rationale)}</small></div><div class="product-amount"><span class="product-label">Amount spent</span><strong>${escapeHtml(amountSpent)}</strong><small>${escapeHtml(amountNote)}</small></div></div>${breakdown}${receiptNote ? `<p class="receipt-note">✓ ${escapeHtml(receiptNote)}</p>` : ''}</section>`;
+  const primaryDiscovery = discovery.source === 'local_browser_fixture' ? { source: 'seeded_catalog', label: 'Seeded local catalog', explanation: 'The authoritative local merchant quote controls inventory and checkout. Browser evidence is read-only in Advanced details.' } : discovery;
+  return `<section class="panel product-panel"><div class="panel-heading"><div><span class="overline">${escapeHtml(itemLabel)}</span><h2>${escapeHtml(itemName)}</h2></div>${discoveryBadge(primaryDiscovery)}</div><div class="discovery-explanation"><strong>${escapeHtml(primaryDiscovery.label || 'Discovery')}</strong><span>${escapeHtml(primaryDiscovery.explanation || '')}</span></div><div class="product-highlight"><div><span class="product-label">Merchant</span><strong>${escapeHtml(merchant)}</strong><small>${escapeHtml(stockNote)}</small><small class="selection-reason">Why this item: ${escapeHtml(rationale)}</small></div><div class="product-amount"><span class="product-label">Amount spent</span><strong>${escapeHtml(amountSpent)}</strong><small>${escapeHtml(amountNote)}</small></div></div>${breakdown}${receiptNote ? `<p class="receipt-note">✓ ${escapeHtml(receiptNote)}</p>` : ''}</section>`;
 }
 
 function balanceSummary(task) {
   const wallet = state.wallet || {};
   const financial = state.projection?.financial || task.financial || {};
-  const starting = financial.balanceBeforeMinor ?? task.wallet?.balanceMinor ?? wallet.initialBalanceMinor;
+  const starting = financial.balanceBeforeMinor;
   const afterPayment = financial.balanceAfterPaymentMinor;
-  const finalBalance = financial.finalBalanceMinor ?? task.wallet?.balanceAfterMinor ?? wallet.balanceMinor ?? starting;
-  const currency = task.currency || wallet.currency;
-  return `<section class="panel balance-panel"><div class="panel-heading"><div><span class="overline">Fake wallet</span><h2>Your balance</h2></div><span class="fixture-chip">NO REAL FUNDS</span></div><div class="balance-grid">${dataCell('Wallet before', formatMoney(starting, currency), 'Before this purchase')}${dataCell('After payment', afterPayment == null ? 'Not charged' : formatMoney(afterPayment, currency), afterPayment == null ? 'No confirmed debit' : 'After the debit')}${dataCell('Final balance', formatMoney(finalBalance, currency), financial.outcome === 'compensated' ? 'After compensation' : 'Current spendable balance')}</div></section>`;
+  const finalBalance = financial.finalBalanceMinor;
+  const currency = task.currency || wallet.currency || 'XSGD';
+  const unknownPayment = task.payment?.status === 'unknown';
+  return `<section class="panel balance-panel"><div class="panel-heading"><div><span class="overline">Task-scoped fake wallet</span><h2>This purchase balance</h2></div><span class="fixture-chip">NO REAL FUNDS</span></div><div class="balance-grid">${dataCell('Wallet before', starting == null ? 'Not started' : formatMoney(starting, currency), starting == null ? 'Funding was not entered' : 'Snapshot before this purchase')}${dataCell('After payment', unknownPayment ? 'Needs confirmation' : afterPayment == null ? (task.payment?.status === 'not_started' ? 'Not started' : 'Not charged') : formatMoney(afterPayment, currency), unknownPayment ? 'Issuer capture is unresolved' : afterPayment == null ? 'No confirmed debit' : 'Snapshot after the debit')}${dataCell('Final balance', unknownPayment ? 'Needs confirmation' : finalBalance == null ? 'Not started' : formatMoney(finalBalance, currency), unknownPayment ? 'Resolve the issuer result first' : finalBalance == null ? 'No task snapshot' : financial.outcome === 'compensated' ? 'After compensation' : 'Task snapshot')}</div></section>`;
 }
 
 function fundingPanel() {
@@ -190,16 +201,17 @@ function fundingPanel() {
   if (latest?.status === 'confirmed') simulationControls = '<div class="choice-actions"><button type="button" class="quiet-button" data-funding-action="reverse">Simulate reversal</button></div>';
   const evidence = latest?.confirmationEvidence;
   const latestDetails = latest ? `<div class="funding-intent"><div class="panel-heading"><div><span class="overline">Latest deposit intent</span><strong>${escapeHtml(latest.amount)}</strong></div>${statusPill(latest.status)}</div><div class="funding-instructions">${dataCell('Mock destination', latest.depositInstructions?.destination || 'Not available', 'Not a wallet or blockchain address')}${dataCell('Memo', latest.depositInstructions?.memo || 'Not available', 'Use only in this local simulation')}${dataCell('Provider reference', shortId(latest.providerReference), 'Safe reference')}${dataCell('Confirmation reference', evidence?.transactionReference || 'Pending', evidence ? 'Mock evidence only' : 'No confirmation yet')}</div>${simulationControls}${latest.status === 'pending' ? `<small class="funding-expiry">Intent expires ${formatDate(latest.expiresAt)}.</small>` : ''}${latest.failureReason ? `<p class="funding-reason">${escapeHtml(latest.failureReason)}</p>` : ''}</div>` : '<p class="advanced-help">Create a local deposit intent after the mock KYC gate is approved.</p>';
-  return `<section class="panel funding-panel"><div class="panel-heading"><div><span class="overline">XSGD funding</span><h2>Fund the fake wallet</h2></div><span class="fixture-chip">LOCAL MOCK</span></div><div class="funding-overview">${dataCell('Available balance', formatMoney(funding.availableBalanceMinor, funding.asset || 'XSGD'), 'Authoritative fake wallet')}${dataCell('Asset / network', `${funding.asset || 'XSGD'} · ${funding.network || 'Avalanche Fuji'}`, 'Local fixture')}</div><div class="funding-gate"><div><span class="product-label">KYC gate</span><strong>${statusPill(kyc.status)} <span>${escapeHtml(kyc.providerReference ? `Reference ${shortId(kyc.providerReference)}` : 'Safe status only')}</span></strong><small>${escapeHtml(kyc.reasonCode || 'Approval is required before an XSGD intent can be created or credited.')}</small></div><div class="choice-actions">${kycControls}</div></div><form id="funding-form" novalidate><label for="funding-amount">Deposit amount</label><div class="funding-form-row"><input id="funding-amount" name="amount" type="text" inputmode="decimal" pattern="[0-9]+(\\.[0-9]{1,2})?" placeholder="25.00" value="25.00"${!approved || state.busy ? ' disabled' : ''}><button type="submit" class="secondary-button"${!approved || state.busy ? ' disabled' : ''}>Create deposit intent</button></div><small class="funding-disclosure">${escapeHtml(funding.disclosure || 'LOCAL SIMULATION ONLY - no real funds or blockchain activity.')}</small></form>${latestDetails}</section>`;
+  const summary = `${statusLabels[kyc.status] || kyc.status} KYC · ${formatMoney(funding.availableBalanceMinor, funding.asset || 'XSGD')} available`;
+  return `<details class="panel funding-panel"><summary><span><span class="overline">Local simulation and funding</span><strong>Mock KYC, seeded fake wallet, and gateway disclosure</strong><small>${escapeHtml(summary)}</small></span><span class="fixture-chip">LOCAL ONLY</span></summary><div class="funding-content"><div class="funding-overview">${dataCell('Available balance', formatMoney(funding.availableBalanceMinor, funding.asset || 'XSGD'), 'Authoritative seeded fake wallet')}${dataCell('Asset / network', `${funding.asset || 'XSGD'} · ${funding.network || 'Avalanche Fuji'}`, 'Local fixture')}</div><div class="funding-gate"><div><span class="product-label">Mock KYC gate</span><strong>${statusPill(kyc.status)} <span>${escapeHtml(kyc.providerReference ? `Reference ${shortId(kyc.providerReference)}` : 'Safe status only')}</span></strong><small>${escapeHtml(kyc.reasonCode || 'Approval is required before a mock XSGD intent can be created or credited.')}</small></div><div class="choice-actions">${kycControls}</div></div><form id="funding-form" novalidate><label for="funding-amount">Seeded fake funding amount</label><div class="funding-form-row"><input id="funding-amount" name="amount" type="text" inputmode="decimal" pattern="[0-9]+(\\.[0-9]{1,2})?" placeholder="25.00" value="25.00"${!approved || state.busy ? ' disabled' : ''}><button type="submit" class="secondary-button"${!approved || state.busy ? ' disabled' : ''}>Create mock deposit intent</button></div><small class="funding-disclosure">${escapeHtml(funding.disclosure || 'LOCAL SIMULATION ONLY - no real funds or blockchain activity.')}</small></form>${latestDetails}<p class="gateway-disclosure">Local merchant gateway: read-only discovery and checkout worker are separate. No external merchant checkout or real payment credentials are used.</p></div></details>`;
 }
 
 function commerceStatus(task) {
   const purchase = task.state === 'failed' ? 'failed' : task.state === 'reconciliation_required' ? 'reconciliation_required' : task.state === 'awaiting_selection' ? 'awaiting_selection' : task.purchaseStatus || task.state;
-  const payment = task.payment?.status || 'pending';
+  const payment = task.payment?.status || 'not_started';
   const inventory = task.inventory?.status || 'not_started';
-  const order = task.order?.status || (task.state === 'failed' ? 'not_started' : 'pending');
-  const fulfillment = task.fulfillment?.status || 'not_started';
-  const delivery = task.delivery?.status || (task.order ? 'pending' : 'not_started');
+  const order = task.order?.status || 'not_started';
+  const fulfillment = task.fulfillment?.status && task.fulfillment.status !== 'pending' ? task.fulfillment.status : 'not_started';
+  const delivery = task.delivery?.status && task.delivery.status !== 'pending' ? task.delivery.status : 'not_started';
   return `<section class="panel commerce-panel"><div class="panel-heading"><div><span class="overline">At a glance</span><h2>Where things stand</h2></div>${statusPill(purchase)}</div><div class="commerce-grid">${dataCell('Inventory', statusLabels[inventory] || inventory)}${dataCell('Payment', statusLabels[payment] || payment)}${dataCell('Order', statusLabels[order] || order)}${dataCell('Fulfillment', statusLabels[fulfillment] || fulfillment)}${dataCell('Delivery', statusLabels[delivery] || delivery)}</div></section>`;
 }
 
@@ -224,6 +236,7 @@ function bandState(task, band) {
   const entries = band.stages.map((name) => task.progress?.find((item) => item.stage === name)).filter(Boolean);
   if (entries.some((item) => ['failed', 'unknown'].includes(item.status))) return 'warning';
   if (entries.every((item) => item.status === 'completed')) return 'success';
+  if (entries.length && entries.every((item) => ['not_started', 'pending', 'skipped'].includes(item.status))) return 'skipped';
   if (task.automation?.status === 'running' || task.automation?.status === 'awaiting_selection' || task.automation?.status === 'awaiting_reconciliation') return 'active';
   return 'pending';
 }
@@ -231,7 +244,8 @@ function bandState(task, band) {
 function bandDetail(task, band, stateName) {
   if (stateName === 'success') return 'Done';
   if (stateName === 'warning') return task.state === 'reconciliation_required' && band.label === 'Pay' ? 'Needs confirmation' : 'Needs attention';
-  if (task.state === 'awaiting_selection' && band.label === 'Find an item') return task.quote?.recommendationOnly ? 'Recommendation ready' : 'Choose an item';
+  if (stateName === 'skipped') return 'Skipped';
+  if (task.state === 'awaiting_selection' && band.label === 'Find an item') return task.quote?.recommendationOnly && task.quote?.mode === 'read-only Playwright fixture' ? 'Recommendation ready' : 'Choose an item';
   if (task.state === 'reconciliation_required' && band.label === 'Pay') return 'Confirm the result';
   if (stateName === 'active') return 'In progress';
   return 'Waiting';
@@ -251,11 +265,12 @@ function candidateDetails(task) {
   const quote = state.projection?.quote || task.quote;
   if (!quote?.candidates?.length) return '';
   const recommendationOnly = Boolean(quote.recommendationOnly);
+  const browserRecommendation = recommendationOnly && quote.mode === 'read-only Playwright fixture';
   const needsChoice = task.state === 'awaiting_selection';
   const selected = quote.candidates.find((candidate) => candidate.id === quote.selectedCandidateId) || quote.candidates.find((candidate) => candidate.id === quote.recommendedCandidateId);
   const selectedEvidence = selected && (selected.sourceUrl || selected.evidence?.observedAt || selected.matchReasons?.length) ? `<div class="selection-evidence"><h4>Selected item evidence</h4><dl class="detail-list">${detailValue('Source URL', selected.sourceUrl || 'Seeded catalog - no browser URL')}${detailValue('Observed', formatDate(selected.evidence?.observedAt))}${detailValue('Match rationale', (selected.matchReasons || []).join('; ') || 'No additional rationale recorded')}</dl></div>` : '';
-  const heading = recommendationOnly && needsChoice ? 'Select a discovery result' : needsChoice ? 'Choose an item' : 'Discovery details';
-  const help = recommendationOnly && needsChoice ? '<p class="advanced-help">Browser discovery is read-only. Select a result to cross-check it against the approved local quote before any stock or payment action.</p>' : needsChoice ? '<p class="advanced-help">Several items fit your request. Choose one to continue. This is the only decision NaviPay needs from you.</p>' : recommendationOnly ? '<p class="advanced-help">This browser result is read-only evidence. It cannot authorize money or inventory.</p>' : '';
+  const heading = browserRecommendation && needsChoice ? 'Select a discovery result' : needsChoice ? 'Choose an item' : 'Discovery details';
+  const help = browserRecommendation && needsChoice ? '<p class="advanced-help">Browser discovery is read-only. Select a result to cross-check it against the approved local quote before any stock or payment action.</p>' : needsChoice ? '<p class="advanced-help">Several local items fit your request. Choose one to continue. This is the only decision NaviPay needs from you.</p>' : browserRecommendation ? '<p class="advanced-help">This browser result is read-only evidence. It cannot authorize money or inventory.</p>' : '';
   return `<div class="advanced-block"><h3>${heading}</h3>${help}<div class="candidate-list">${quote.candidates.map((candidate) => `<div class="candidate-row ${candidate.id === quote.selectedCandidateId ? 'selected' : ''}"><div><strong>${escapeHtml(candidate.item)}</strong><span>${escapeHtml(candidate.merchant)} · ${escapeHtml(candidate.variant)}</span></div><div class="candidate-end"><strong>${formatMoney(candidate.totalMinor, candidate.currency)}</strong>${candidate.availability === 'in_stock' ? '<small>In stock</small>' : '<small>Out of stock</small>'}${needsChoice && candidate.availability === 'in_stock' ? `<button type="button" class="secondary-button" data-candidate-id="${escapeHtml(candidate.id)}">Select for purchase</button>` : ''}</div></div>`).join('')}</div>${selectedEvidence}</div>`;
 }
 
@@ -281,8 +296,15 @@ function historyDetails() {
   return `<details class="advanced-details history-details"><summary>Previous purchases <span>${state.tasks.length} saved</span></summary><div class="history-grid">${state.tasks.map((task) => `<button type="button" class="history-item${task.id === state.task?.id ? ' current' : ''}" data-task-id="${escapeHtml(task.id)}"><span><strong>${escapeHtml(task.request.raw)}</strong><small>${escapeHtml(task.quote?.item || 'No item selected')}</small></span>${statusPill(task.state)}</button>`).join('')}</div></details>`;
 }
 
+function receiptPanel(task) {
+  const receipt = state.projection?.receipt || task.receipt;
+  if (!receipt || receipt.status !== 'confirmed') return '';
+  const currency = receipt.currency || task.currency || 'XSGD';
+  return `<section class="panel receipt-panel"><div class="panel-heading"><div><span class="overline">Primary success artifact</span><h2>Receipt</h2></div>${statusPill(receipt.status)}</div><div class="receipt-heading"><div><strong>${escapeHtml(receipt.item || 'Item')}</strong><small>${escapeHtml(receipt.merchant || 'Merchant')} · ${escapeHtml(receipt.variant || '')}</small></div><strong>${formatMoney(receipt.totalMinor ?? receipt.amountMinor, currency)}</strong></div><div class="quote-breakdown">${dataCell('Item', formatMoney(receipt.subtotalMinor, currency))}${dataCell('Shipping', formatMoney(receipt.shippingMinor, currency))}${dataCell('Tax', formatMoney(receipt.taxMinor, currency))}${dataCell('Total', formatMoney(receipt.totalMinor ?? receipt.amountMinor, currency))}</div><div class="balance-grid receipt-balances">${dataCell('Balance before', formatMoney(receipt.balanceBeforeMinor, currency))}${dataCell('After payment', formatMoney(receipt.balanceAfterPaymentMinor, currency))}${dataCell('Final balance', formatMoney(receipt.finalBalanceMinor, currency))}${dataCell('Net charged', formatMoney(receipt.netChargedMinor, currency))}</div><div class="commerce-grid receipt-statuses">${dataCell('Payment', statusLabels[receipt.paymentStatus] || receipt.paymentStatus || 'Not available')}${dataCell('Order', statusLabels[receipt.orderStatus] || receipt.orderStatus || 'Not available')}${dataCell('Fulfillment', statusLabels[receipt.fulfillmentStatus] || receipt.fulfillmentStatus || 'Not available')}${dataCell('Delivery', statusLabels[receipt.deliveryStatus] || receipt.deliveryStatus || 'Not available')}</div><dl class="detail-list receipt-references">${detailValue('Receipt reference', shortId(receipt.id))}${detailValue('Order reference', shortId(receipt.orderReference))}${detailValue('Payment reference', shortId(receipt.paymentReference))}${detailValue('Quote / cart', `${shortId(receipt.quoteId)} / ${shortId(receipt.cartId)}`)}${detailValue('Issued', formatDate(receipt.issuedAt))}</dl><p class="receipt-disclosure">${escapeHtml(receipt.disclosure || 'SIMULATED receipt - local fake wallet and merchant gateway only.')}</p></section>`;
+}
+
 function currentRun(task) {
-  return `<div class="run-heading"><div><span class="overline">Current purchase</span><h2>${escapeHtml(task.request.raw)}</h2></div>${modeBadge('FAKE WALLET')}</div><div class="purchase-flow">${productSummary(task)}${balanceSummary(task)}${commerceStatus(task)}${progressPanel(task)}</div>${cardStatus(task)}${advancedDetails(task)}${historyDetails()}`;
+  return `<div class="run-heading"><div><span class="overline">Current purchase</span><h2>${escapeHtml(task.request.raw)}</h2></div>${modeBadge('FAKE WALLET')}</div>${receiptPanel(task)}<div class="purchase-flow">${productSummary(task)}${balanceSummary(task)}${commerceStatus(task)}${progressPanel(task)}</div>${cardStatus(task)}${advancedDetails(task)}${historyDetails()}`;
 }
 
 function render() {
@@ -362,7 +384,13 @@ async function runPurchase(event) {
   } catch (error) {
     if (error.payload?.task) {
       state.task = error.payload.task;
+      state.projection = error.payload.projection || null;
       await refresh().catch(() => {});
+    } else {
+      state.task = null;
+      state.projection = null;
+      state.audit = [];
+      state.ledger = [];
     }
     state.error = { code: error.code, message: error.message };
   } finally {

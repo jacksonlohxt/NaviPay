@@ -126,6 +126,10 @@ class LocalFakeIssuerAdapter {
     return clone(this._freshStatus(card));
   }
 
+  hasCapability(cardId) {
+    return this.capabilities.has(cardId);
+  }
+
   withCredential(cardId, callback) {
     const card = this._requireCard(cardId);
     const capability = this.capabilities.get(card.cardId);

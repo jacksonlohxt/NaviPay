@@ -52,6 +52,10 @@ button:disabled { cursor: wait; opacity: .62; }
 .request-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .85fr); align-items: center; gap: clamp(1.3rem, 4vw, 3rem); margin-bottom: 1.4rem; padding: clamp(1.3rem, 4vw, 2.5rem); border-radius: 26px; background: var(--ink); color: white; box-shadow: var(--shadow); }
 .request-copy h1 { max-width: 500px; margin: .35rem 0 .6rem; font-size: clamp(2rem, 5vw, 3.35rem); line-height: .98; letter-spacing: -.07em; }
 .request-copy p { max-width: 500px; margin: 0; color: #bdd2c7; font-size: .9rem; }
+.local-disclosure { margin-top: .8rem !important; color: #d5e4db !important; font-size: .7rem !important; }
+.local-path { display: flex; align-items: baseline; flex-wrap: wrap; gap: .35rem; margin: .7rem 0 0 !important; color: #abc6b8; font-size: .66rem !important; }
+.local-path span { color: #d5e4db; font-weight: 850; }
+.local-path strong { color: #e0eee6; font-weight: 750; }
 .overline { display: block; color: var(--muted); font-size: .62rem; font-weight: 950; letter-spacing: .16em; text-transform: uppercase; }
 .request-card .overline { color: var(--lime); }
 #request-form { padding: 1rem; border: 1px solid rgba(255,255,255,.14); border-radius: 17px; background: rgba(255,255,255,.07); }
@@ -107,7 +111,18 @@ button:disabled { cursor: wait; opacity: .62; }
 .product-amount strong { font-size: 1rem; }
 .product-amount small { font-size: .64rem; }
 .funding-panel { margin-bottom: .85rem; background: #f7fff0; }
+.funding-panel > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; cursor: pointer; list-style-position: inside; }
+.funding-panel > summary::marker { color: var(--ink-soft); }
+.funding-panel > summary strong, .funding-panel > summary small { display: block; }
+.funding-panel > summary strong { margin-top: .25rem; font-size: .86rem; }
+.funding-panel > summary small { margin-top: .2rem; color: var(--muted); font-size: .68rem; }
+.funding-content { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .funding-panel h2 { color: var(--ink); }
+.gateway-disclosure { margin: .8rem 0 0; color: var(--muted); font-size: .66rem; }
+.optional-discovery { margin-top: .75rem; border-top: 1px solid rgba(255,255,255,.12); }
+.optional-discovery summary { padding-top: .75rem; color: #d5e4db; cursor: pointer; font-size: .68rem; font-weight: 850; list-style-position: inside; }
+.optional-discovery summary span { margin-left: .3rem; color: #91b3a4; font-size: .61rem; font-weight: 650; }
+.optional-discovery-content { padding-top: .65rem; }
 .funding-overview { display: grid; grid-template-columns: repeat(2, 1fr); gap: .55rem; margin-bottom: .75rem; }
 .funding-gate { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .75rem; padding: .8rem; border: 1px solid #d4e4c2; border-radius: 13px; background: rgba(217,241,229,.45); }
 .funding-gate strong, .funding-gate small { display: block; }
@@ -132,6 +147,14 @@ button:disabled { cursor: wait; opacity: .62; }
 .quote-breakdown .data-cell { background: rgba(217,241,229,.55); }
 .selection-reason { color: #315a50 !important; font-weight: 750; }
 .receipt-note { margin: .75rem 0 0; color: #315a50; font-size: .72rem; font-weight: 800; }
+.receipt-panel { margin-bottom: .85rem; border-color: #b8d9c1; background: #f5fff0; }
+.receipt-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding: .8rem; border-radius: 13px; background: var(--lime); }
+.receipt-heading strong, .receipt-heading small { display: block; }
+.receipt-heading small { margin-top: .15rem; color: #46653d; font-size: .68rem; }
+.receipt-balances, .receipt-statuses { margin-top: .55rem; }
+.receipt-statuses { grid-template-columns: repeat(4, 1fr); }
+.receipt-references { margin-top: .65rem; }
+.receipt-disclosure { margin: .75rem 0 0; color: var(--muted); font-size: .66rem; }
 .data-cell { min-width: 0; padding: .7rem; border-radius: 12px; background: rgba(255,255,255,.55); }
 .data-cell strong { display: block; margin-top: .25rem; overflow-wrap: anywhere; font-size: .86rem; }
 .data-cell small { display: block; margin-top: .2rem; color: var(--muted); font-size: .63rem; }
@@ -153,6 +176,7 @@ button:disabled { cursor: wait; opacity: .62; }
 .progress-step { display: flex; align-items: center; gap: .55rem; min-width: 0; padding: .6rem .55rem; border: 1px solid var(--line); border-radius: 12px; background: #f8f8f1; }
 .progress-step.success { border-color: #b8d9c1; background: #eff9f1; }
 .progress-step.warning, .progress-step.active { border-color: #ecd599; background: #fff9e6; }
+.progress-step.skipped { border-color: #d9ddd3; background: #f0f1ea; }
 .progress-number { display: grid; flex: 0 0 23px; place-items: center; width: 23px; height: 23px; border-radius: 50%; background: #e6e7dc; font-size: .7rem; font-weight: 950; }
 .progress-step.success .progress-number { background: #99d5ab; }
 .progress-step.warning .progress-number, .progress-step.active .progress-number { background: #f0d27e; }
@@ -231,7 +255,7 @@ button:disabled { cursor: wait; opacity: .62; }
   .run-heading { align-items: flex-start; flex-direction: column; }
   .product-highlight { grid-template-columns: 1fr; }
   .product-amount { min-width: 0; text-align: left; }
-  .balance-grid, .commerce-grid, .quote-breakdown, .card-status-grid, .funding-overview, .funding-instructions { grid-template-columns: 1fr; }
+  .balance-grid, .commerce-grid, .quote-breakdown, .card-status-grid, .funding-overview, .funding-instructions, .receipt-statuses { grid-template-columns: 1fr; }
   .funding-gate { align-items: flex-start; flex-direction: column; }
   .funding-form-row { flex-direction: column; }
   .funding-form-row .secondary-button { width: 100%; }

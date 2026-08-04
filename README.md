@@ -1,6 +1,6 @@
 # NaviPay
 
-NaviPay is a local-only commerce sandbox. A user enters a purchase instruction such as `Find an Apple Magic Keyboard` and an optional approved target commerce site, then presses **Discover and purchase**. The server interprets the intent, reads a bounded local replay merchant through a separate read-only Playwright worker, returns normalized candidates and match evidence, then uses the selected candidate with the seeded fake quote, inventory, XSGD wallet, order, fulfillment, delivery, receipt, and audit flow.
+NaviPay is a local-only commerce sandbox. A user enters a purchase instruction such as `Find an Apple Magic Keyboard` and presses **Discover and purchase**. The default path is the seeded local merchant catalog and local gateway. Optional approved target-site evidence is explicitly read-only and collapsed in the UI. The server interprets the intent, returns normalized candidates and match evidence, then uses the authoritative local quote, inventory, XSGD wallet, order, fulfillment, delivery, receipt, and audit flow.
 
 Everything in this repository is simulated. No real money, wallet keys, merchant credentials, inventory, customer identity, or delivery network is used.
 
@@ -22,10 +22,10 @@ npm run check
 
 ## Product walkthrough
 
-1. Enter a purchase instruction such as `I want a keyboard` and, when using browser discovery, enter the approved target site URL in **Target commerce site**. Press **Discover and purchase** once.
-2. NaviPay ranks valid in-stock candidates with a deterministic policy: brand match, category match, distinct keyword matches, then a unique top score. A clear winner within the XSGD 1,000 task ceiling is selected automatically. The calm view shows the selected item, why it won, the discovery source, and source evidence.
+1. Enter a purchase instruction such as `I want a keyboard` and press **Discover and purchase** once. NaviPay starts with the seeded local catalog and local merchant gateway. Optional browser discovery is available in a clearly labelled collapsed section and never has checkout authority.
+2. NaviPay applies bounded budget parsing and hard brand/category constraints, then ranks valid in-stock candidates with a deterministic policy. A clear winner within the XSGD 1,000 task ceiling is selected automatically. An exact out-of-stock brand is never silently replaced by another brand.
 3. NaviPay cross-checks browser identity and quote amounts against the authoritative seeded local catalog, then automatically reserves inventory, verifies the fake wallet, transfers fake funds, confirms merchant credit, creates the order, fulfills it, delivers it, issues the receipt, and records the audit trail. The quiet four-part progress summary shows this work without stage-by-stage controls.
-4. See the outcome at a glance: the interpreted request, selected merchant and rationale, quote breakdown, wallet before/after-payment/final balance, inventory, payment, order, fulfillment, delivery, and receipt status.
+4. See the receipt first, with the item, merchant, exact price breakdown, task-scoped balances before and after payment, payment state, order, fulfillment, delivery, safe references, issue time, and simulated-only disclosure. Lifecycle stages that were never entered show **Not started** or **Skipped** rather than another task's state.
 5. NaviPay pauses only for a genuine tie or ambiguity, malformed/stale/blocked discovery, no available or over-cap item, insufficient fake funds, an unknown payment result, or another safety exception. **Advanced details** explains the issue and available action. Technical references, ledger legs, operations, chain evidence, and the safe activity timeline stay expandable.
 
 The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00. Issuer authorization and capture are the only default purchase debit path. The fake issuer is funded by that wallet, and the direct wallet transfer path exists only for explicit legacy test mode.
@@ -93,7 +93,7 @@ The adapter runs in a separate worker process, permits only GET and HEAD request
 
 Every sandbox task response includes the legacy `task` object for deliberate compatibility and a versioned server-owned `projection` read model. The projection is the browser contract and contains only interpreted request data, recommendation rationale and catalog evidence, the locked quote and expiry, inventory reservation, financial snapshots, payment, merchant credit, order, fulfillment, delivery, receipt, safe operations, and a redacted timeline. It never includes provider payloads, credentials, or full customer address details. `GET /api/tasks/:id/projection` retrieves the same projection after a reload; list responses include `projections`.
 
-Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaymentMinor`, `finalBalanceMinor`, `netChargedMinor`, compensation status and references, and a financial `outcome`. This keeps compensation and unknown-payment reconciliation truthful after process restart.
+Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaymentMinor`, `finalBalanceMinor`, `netChargedMinor`, compensation status and references, and a financial `outcome`. These are task-scoped snapshots and never fall back to the current global wallet balance. Locked quotes also persist quote and cart IDs, a line snapshot, quote expiry/status, budget status, and a stable snapshot hash; inventory reservations and order confirmation validate that snapshot.
 
 - `POST /api/purchases/run` with `{ "request": "I want a mouse" }` runs the complete bounded lifecycle. Send an `Idempotency-Key` header.
 - `POST /api/tasks/:id/run` resumes a run waiting for an explicit candidate selection after a genuine ambiguity or tie.
@@ -111,11 +111,13 @@ The server entrypoint is `src/server.js`. The product orchestration and adapter 
 
 ## Recovery scenarios
 
-The server supports deterministic local scenarios for integration testing: `insufficient-funds`, `payment-decline`, `decline`, `unknown-payment`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `duplicate`, `browser-crash`, `order-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
+The server supports deterministic local scenarios for integration testing: `no-match`, `over-budget`, `ambiguity`, `low-balance`, `insufficient-funds`, `payment-decline`, `decline`, `unknown-payment`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `duplicate`, `browser-crash`, `card-issued-before-checkout`, `order-failure`, `order-commit-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
 
+- No-match, over-budget, ambiguity, exact out-of-stock, low-balance, and payment decline outcomes stop before an unconfirmed payment and show explicit task-scoped results.
 - Insufficient funds and payment decline release the reservation and create no ledger entries.
 - Unknown payment holds the reservation and blocks retries. Reconciliation either applies the one idempotent transfer or releases the reservation.
-- Merchant-credit and order failures compensate an already confirmed wallet transfer and release reserved stock. Compensation is itself a double-entry operation.
+- Merchant-credit, order, and inventory-commit failures compensate an already confirmed wallet transfer and release stock without leaving a confirmed order. Compensation is itself a double-entry operation.
+- Checkpoint fixtures use persisted task snapshots and do not change the default seed for other runs.
 - Delivery and fulfillment failures do not rewrite a confirmed payment or order as failed. Their independent statuses remain visible on the receipt and task.
 - Repeating an idempotency key replays the persisted response. Repeating an adapter operation uses its persisted operation, reservation, transfer, order, or delivery reference and does not duplicate side effects.
 
