@@ -20,6 +20,8 @@ npm test
 npm run check
 ```
 
+The public repository contains the application source, tests, and deterministic local HTML fixtures. Runtime state is deliberately excluded: `.data/` is ignored and contains only local wallet, inventory, and task state. Use `NAVIPAY_DATA_FILE` for an isolated local state file, and inject any future provider secret through server-side deployment configuration rather than committing it.
+
 ## Product walkthrough
 
 1. Enter a purchase instruction such as `I want a keyboard` and press **Discover and purchase** once. NaviPay starts with the seeded local catalog and local merchant gateway. Optional browser discovery is available in a clearly labelled collapsed section and never has checkout authority.
@@ -170,6 +172,8 @@ A future StraitsX and Avalanche implementation must not be inferred from this mo
 ## Future organizer adapters
 
 The local adapters are intentionally narrow replacement points. A future approved organizer integration can implement the canonical methods in `src/sandbox.js` for discovery, funding lookup, inventory reservation, wallet transfer, merchant credit, order, fulfillment, or delivery. Normalize provider status, timeout, and reference data inside that adapter, keep credentials in the provider process, and preserve the server-owned operation IDs, exact quote, inventory-before-payment invariant, idempotency, compensation, and redacted browser contract. The local fixtures remain the default until an approved provider contract and credentials exist. Adapters must return normalized facts to the service; projection builders are the only boundary used by browser read APIs.
+
+StraitsX and Amazon are future boundaries, not current integrations. StraitsX would require the official XSGD funding, custody, webhook, settlement, and KYC contracts described above. Amazon is not scraped or accessed; any future Amazon support would require an approved official API or partner contract, terms-compliant catalog and order capabilities, and a separate adapter. No live provider endpoint, Amazon credential, or external checkout is included here.
 
 ## Deliberate boundary
 
