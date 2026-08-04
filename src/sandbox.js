@@ -51,6 +51,17 @@ const SANDBOX_SCENARIOS = new Set([
   'over-budget',
   'ambiguity',
   'ambiguous',
+  'ambiguous-same-brand',
+  'missing-product-type',
+  'pending-kyc',
+  'rejected-kyc',
+  'insufficient-funding',
+  'merchant-category-violation',
+  'policy-block',
+  'risk-block',
+  'duplicate-instruction',
+  'stale-quote',
+  'stale-quote-before-card',
   'low-balance',
   'duplicate-replay',
   'restart-recovery',
@@ -206,7 +217,12 @@ const CATALOG = Object.freeze([
   }
 ]);
 
-const STOP_WORDS = new Set(['a', 'an', 'and', 'below', 'budget', 'buy', 'for', 'get', 'i', 'like', 'limit', 'max', 'maximum', 'me', 'more', 'my', 'no', 'of', 'please', 'sgd', 'some', 'spend', 'spending', 'than', 'the', 'to', 'under', 'up', 'want', 'within', 'would', 'xsgd']);
+const APPROVED_MERCHANT_SCOPE = Object.freeze([...new Map(CATALOG.map((entry) => [entry.merchantId, { merchantId: entry.merchantId, merchant: entry.merchant, merchantDomain: entry.merchantDomain }])).values()]);
+const APPROVED_MERCHANT_IDS = new Set(APPROVED_MERCHANT_SCOPE.map((entry) => entry.merchantId));
+const APPROVED_PRODUCT_CATEGORIES = new Set(['keyboards', 'mice', 'earphones']);
+const DEFAULT_PURCHASE_PURPOSE = 'one_purchase';
+
+const STOP_WORDS = new Set(['a', 'an', 'and', 'below', 'budget', 'buy', 'for', 'find', 'get', 'i', 'like', 'limit', 'max', 'maximum', 'me', 'more', 'my', 'no', 'of', 'please', 'quantity', 'qty', 'sgd', 'some', 'spend', 'spending', 'than', 'the', 'to', 'under', 'unit', 'units', 'up', 'want', 'within', 'would', 'xsgd']);
 const CATEGORY_ALIASES = [
   ['keyboards', ['keyboard', 'keyboards']],
   ['mice', ['mouse', 'mice']],
@@ -254,17 +270,36 @@ function parseRequest(value) {
     throw new AdapterError('INVALID_PURCHASE_REQUEST', 'Purchase request must be plain text between 1 and 240 characters.');
   }
   const raw = value.trim();
+  const unsupportedCurrency = raw.match(/\b(usd|eur|gbp|jpy|aud|cad)\b/i);
+  if (unsupportedCurrency) throw new AdapterError('UNSUPPORTED_CURRENCY', 'NaviPay local purchases use XSGD only.');
   const budget = parseBudget(raw);
   const words = normalizeWords(raw);
   const text = words.join(' ');
-  const brand = cleanAliases(BRAND_ALIASES).find(([, aliases]) => aliases.some((alias) => words.includes(alias)))?.[0] || null;
+  const knownBrand = cleanAliases(BRAND_ALIASES).find(([, aliases]) => aliases.some((alias) => words.includes(alias)))?.[0] || null;
   const category = cleanAliases(CATEGORY_ALIASES).find(([, aliases]) => aliases.some((alias) => text.includes(alias)))?.[0] || null;
+  const categoryWordIndex = category ? words.findIndex((word) => CATEGORY_ALIASES.find(([canonical]) => canonical === category)?.[1].includes(word)) : -1;
+  const trailingBrandWord = !knownBrand ? /\b(?:from|by|brand)\s+([a-z][a-z0-9-]*)\b/i.exec(raw)?.[1] || null : null;
+  const inferredBrandWord = !knownBrand && categoryWordIndex > 0
+    ? words.slice(0, categoryWordIndex).filter((word) => !STOP_WORDS.has(word) && !/^\d+$/.test(word)).at(-1)
+    : null;
+  const requestedBrandWord = knownBrand || inferredBrandWord || trailingBrandWord;
+  const brand = requestedBrandWord ? (knownBrand || `${requestedBrandWord.charAt(0).toUpperCase()}${requestedBrandWord.slice(1)}`) : null;
+  const quantityMatch = /\b(?:quantity|qty)\s*(?:of\s*)?(\d{1,3})\b/i.exec(raw) || /\b(\d{1,3})\s+(?:units?|items?)\b/i.exec(raw);
+  const quantity = quantityMatch ? Number(quantityMatch[1]) : 1;
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 10) throw new AdapterError('INVALID_QUANTITY', 'Quantity must be a whole number from 1 to 10.');
   const keywords = [...new Set(words.filter((word) => !STOP_WORDS.has(word) && !/^\d+$/.test(word)))];
   if (!keywords.length) throw new AdapterError('INVALID_PURCHASE_REQUEST', 'Purchase request must include an item keyword.');
+  const product = typeof CATALOG !== 'undefined'
+    ? CATALOG.find((entry) => normalizeWords(entry.item).every((word) => words.includes(word)))?.item || null
+    : null;
+  const productCategory = category || (product ? CATALOG.find((entry) => entry.item === product)?.productCategory || null : null);
   return {
     normalized: words.join(' '),
     brand,
-    productCategory: category,
+    product: product || null,
+    productCategory,
+    quantity,
+    currency: CURRENCY,
     keywords,
     budgetMinor: budget?.amountMinor ?? null,
     budget: budget ? { amountMinor: budget.amountMinor, currency: budget.currency, raw: budget.raw } : null
@@ -317,7 +352,8 @@ function categoryFromLegacyIntent(intent) {
 function matchesHardIntent(candidate, intent) {
   const brandMatches = !intent?.brand || String(candidate?.brand || '').toLowerCase() === intent.brand.toLowerCase();
   const categoryMatches = !intent?.productCategory || candidate?.productCategory === intent.productCategory;
-  return brandMatches && categoryMatches;
+  const productMatches = !intent?.product || normalizeWords(candidate?.item || '').join(' ') === normalizeWords(intent.product).join(' ');
+  return brandMatches && categoryMatches && productMatches;
 }
 
 class SandboxDomainError extends Error {
@@ -350,9 +386,10 @@ class LocalDiscoveryAdapter {
     const eligibleCatalog = this.catalog.filter((entry) => {
       const brandMatches = !intent?.brand || entry.brand.toLowerCase() === intent.brand.toLowerCase();
       const categoryMatches = !category || entry.productCategory === category;
-      return brandMatches && categoryMatches;
+      const productMatches = !intent?.product || normalizeWords(entry.item).join(' ') === normalizeWords(intent.product).join(' ');
+      return brandMatches && categoryMatches && productMatches;
     });
-    const candidates = eligibleCatalog
+    let candidates = eligibleCatalog
       .map((entry, index) => {
         const brandMatch = Boolean(intent?.brand && intent.brand.toLowerCase() === entry.brand.toLowerCase());
         const categoryMatch = Boolean(category && category === entry.productCategory);
@@ -389,7 +426,7 @@ class LocalDiscoveryAdapter {
             ...(categoryMatch ? [`Category match: ${entry.productCategory}`] : []),
             ...(matches.length ? [`Keyword matches: ${matches.join(', ')}`] : [])
           ],
-          quoteExpiresAt: new Date(this.clock().getTime() + 15 * 60 * 1000).toISOString(),
+          quoteExpiresAt: new Date(this.clock().getTime() + (['stale-quote', 'stale-quote-before-card'].includes(scenario) ? -1 : 15 * 60 * 1000)).toISOString(),
           evidence: {
             type: 'local-catalog-fixture',
             source: 'NaviPay seeded merchant sandbox',
@@ -403,6 +440,20 @@ class LocalDiscoveryAdapter {
       .filter(Boolean)
       .sort((left, right) => right.relevanceScore - left.relevanceScore || left._catalogOrder - right._catalogOrder)
       .map(({ _catalogOrder, ...candidate }) => candidate);
+    if (scenario === 'ambiguous-same-brand' && candidates.length === 1) {
+      const original = candidates[0];
+      candidates = [original, {
+        ...clone(original),
+        id: `${original.id}-alternate`,
+        sku: `${original.sku}-alternate`,
+        variantId: `${original.variantId}-alternate`,
+        item: `${original.item} Alternate`,
+        variant: `${original.variant} alternate configuration`,
+        evidence: { ...original.evidence, catalogId: `${original.sku}-alternate` },
+        matchReasons: [...original.matchReasons, 'Same-brand alternate fixture'],
+        relevanceScore: original.relevanceScore
+      }];
+    }
     if (!candidates.length) throw new AdapterError('NO_LOCAL_MATCHES', 'The local merchant sandbox has no keyboard, mouse, or earphone match for that request.');
     return {
       mode: SANDBOX_MODE,
@@ -412,7 +463,7 @@ class LocalDiscoveryAdapter {
       candidates,
       recommendedCandidateId: candidates[0].id,
       rankingPolicy: 'Seeded catalog policy: hard brand/category constraints, category match, brand match, keyword matches, then stable catalog order.',
-      recommendationOnly: ['ambiguity', 'ambiguous'].includes(scenario)
+      recommendationOnly: ['ambiguity', 'ambiguous', 'ambiguous-same-brand'].includes(scenario)
     };
   }
 }
@@ -1118,6 +1169,60 @@ function safeReference(value) {
   return value || null;
 }
 
+function safeAuthorizationEnvelope(envelope) {
+  if (!envelope) return null;
+  const constraints = envelope.normalizedConstraints || {};
+  return {
+    version: envelope.version || 1,
+    purpose: envelope.purpose || DEFAULT_PURCHASE_PURPOSE,
+    originalInstruction: String(envelope.originalInstruction || '').slice(0, 240),
+    normalizedConstraints: {
+      normalized: constraints.normalized || null,
+      brand: constraints.brand || null,
+      product: constraints.product || null,
+      productCategory: constraints.productCategory || null,
+      quantity: constraints.quantity ?? 1,
+      explicitBudgetMinor: constraints.explicitBudgetMinor ?? null,
+      spendingCeilingMinor: constraints.spendingCeilingMinor ?? null,
+      currency: constraints.currency || CURRENCY,
+      merchantScope: Array.isArray(constraints.merchantScope) ? constraints.merchantScope.map((merchant) => ({ merchantId: merchant.merchantId, merchant: merchant.merchant, merchantDomain: merchant.merchantDomain })) : []
+    }
+  };
+}
+
+function safeAuthorizationDecision(decision) {
+  if (!decision) return null;
+  return {
+    version: decision.version || 1,
+    decisionId: safeReference(decision.decisionId),
+    status: decision.status,
+    code: decision.code || null,
+    reason: decision.reason,
+    purpose: decision.purpose || DEFAULT_PURCHASE_PURPOSE,
+    decidedAt: decision.decidedAt || null,
+    checks: decision.checks ? clone(decision.checks) : {},
+    candidate: decision.candidate ? {
+      id: safeReference(decision.candidate.id),
+      sku: safeReference(decision.candidate.sku),
+      variantId: safeReference(decision.candidate.variantId),
+      item: decision.candidate.item || null,
+      variant: decision.candidate.variant || null,
+      brand: decision.candidate.brand || null,
+      productCategory: decision.candidate.productCategory || null,
+      merchantId: safeReference(decision.candidate.merchantId),
+      merchant: decision.candidate.merchant || null,
+      merchantDomain: decision.candidate.merchantDomain || null,
+      mcc: decision.candidate.mcc || '5732',
+      amountMinor: decision.candidate.totalMinor ?? decision.candidate.amountMinor ?? null,
+      currency: decision.candidate.currency || null,
+      quoteId: safeReference(decision.candidate.quoteId),
+      cartId: safeReference(decision.candidate.cartId),
+      snapshotHash: safeReference(decision.candidate.snapshotHash),
+      expiresAt: decision.candidate.quoteExpiresAt || decision.candidate.expiresAt || null
+    } : null
+  };
+}
+
 function projectOperation(operation) {
   if (!operation) return null;
   return {
@@ -1261,11 +1366,18 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
       interpreted: task.request?.intent ? {
         normalized: task.request.intent.normalized,
         brand: task.request.intent.brand,
+        product: task.request.intent.product || null,
         productCategory: task.request.intent.productCategory,
+        quantity: task.request.intent.quantity ?? 1,
+        currency: task.request.intent.currency || task.currency,
         keywords: task.request.intent.keywords,
         budgetMinor: task.request.intent.budgetMinor ?? null,
         budget: task.request.intent.budget ? clone(task.request.intent.budget) : null
       } : null
+    },
+    authorization: {
+      envelope: safeAuthorizationEnvelope(task.authorizationEnvelope),
+      decision: safeAuthorizationDecision(task.authorizationDecision)
     },
     recommendation: quote?.recommendation || null,
     discovery,
@@ -1498,7 +1610,7 @@ class NaviPaySandboxService {
       task.purchaseStatus = 'failed';
       task.failure = { stage: stageName, code, message };
       if (!['authorized', 'compensated'].includes(task.financial?.outcome)) {
-        const outcomeByCode = { NO_LOCAL_MATCHES: 'no_match', SPENDING_CEILING_EXCEEDED: 'over_budget', OUT_OF_STOCK: 'out_of_stock', AMBIGUOUS_MATCH: 'ambiguity', INSUFFICIENT_FUNDS: 'low_balance', PAYMENT_DECLINED: 'declined', PAYMENT_DECLINED_RECONCILED: 'declined', CAPTURE_TIMEOUT: 'unknown' };
+        const outcomeByCode = { NO_LOCAL_MATCHES: 'no_match', MISSING_PRODUCT_TYPE: 'invalid_intent', SPENDING_CEILING_EXCEEDED: 'over_budget', OUT_OF_STOCK: 'out_of_stock', AMBIGUOUS_MATCH: 'ambiguity', INSUFFICIENT_FUNDS: 'low_balance', KYC_NOT_APPROVED: 'kyc_blocked', MERCHANT_CATEGORY_NOT_ALLOWED: 'policy_blocked', POLICY_BLOCKED: 'policy_blocked', DUPLICATE_INSTRUCTION: 'duplicate', QUOTE_EXPIRED: 'stale_quote', PAYMENT_DECLINED: 'declined', PAYMENT_DECLINED_RECONCILED: 'declined', CAPTURE_TIMEOUT: 'unknown' };
         task.financial = { ...task.financial, outcome: outcomeByCode[code] || 'failed' };
       }
       task.automation = { ...task.automation, status: 'stopped', nextAction: 'Review the recorded result. No blind retry was attempted.', completedAt: now(this.clock) };
@@ -1577,6 +1689,23 @@ class NaviPaySandboxService {
       targetSite: targetSiteRecord,
       walletId: DEMO_WALLET.id,
       request: { raw, intent },
+      authorizationEnvelope: {
+        version: 1,
+        purpose: DEFAULT_PURCHASE_PURPOSE,
+        originalInstruction: raw,
+        normalizedConstraints: {
+          normalized: intent.normalized,
+          brand: intent.brand,
+          product: intent.product || null,
+          productCategory: intent.productCategory,
+          quantity: intent.quantity,
+          explicitBudgetMinor: requestedBudgetMinor,
+          spendingCeilingMinor: effectiveCeilingMinor,
+          currency: intent.currency || CURRENCY,
+          merchantScope: clone(APPROVED_MERCHANT_SCOPE)
+        }
+      },
+      authorizationDecision: null,
       state: 'created',
       purchaseStatus: 'pending',
       recommendation: null,
@@ -2061,6 +2190,94 @@ class NaviPaySandboxService {
     });
   }
 
+  _recordAuthorizationDecision(taskId, { status, code = null, reason, checks = {}, candidate = null } = {}) {
+    const task = this.getTask(taskId);
+    const decision = {
+      version: 1,
+      decisionId: stableReference('AUTHZ', `${task.id}:${status}:${code || 'approved'}:${task.quote?.snapshotHash || 'unlocked'}`),
+      status,
+      code,
+      reason,
+      purpose: task.authorizationEnvelope?.purpose || DEFAULT_PURCHASE_PURPOSE,
+      decidedAt: now(this.clock),
+      checks,
+      candidate: candidate ? clone(candidate) : null
+    };
+    this._updateTask(taskId, (current) => { current.authorizationDecision = decision; });
+    this.store.transaction((data) => {
+      this._audit(data, taskId, status === 'approved' ? 'authorization.approved' : 'authorization.stopped', status === 'approved' ? 'success' : status === 'paused' ? 'warning' : 'error', reason, {
+        operationId: `op_${taskId}_authorization`,
+        reference: decision.decisionId,
+        code,
+        decision: safeAuthorizationDecision(decision)
+      });
+    });
+    return decision;
+  }
+
+  _bootstrapDefaultLocalKyc(task) {
+    if (['pending-kyc', 'rejected-kyc'].includes(task.scenario)) return;
+    if (this.kycProvider.providerId !== KYC_PROVIDER_ID) return;
+    if (Object.keys(this.store.data.kycEvents || {}).length > 0) return;
+    const profile = this.getKycStatus();
+    if (profile.status !== 'pending' || typeof this.kycProvider.receiveDecision !== 'function') return;
+    try {
+      const decision = this.kycProvider.receiveDecision({
+        profile,
+        decisionId: kycStableReference('MOCK-KYC-AUTO', task.id),
+        action: 'approve',
+        reasonCode: 'simulated_approval'
+      });
+      this._applyKycDecision({ fingerprint: JSON.stringify({ taskId: task.id, automatic: true }), decision });
+      this.store.transaction((data) => {
+        this._audit(data, task.id, 'authorization.kyc_ready', 'info', 'The local mock KYC fixture was approved for this one-instruction simulation.', { operationId: `op_${task.id}_authorization`, status: 'approved' });
+      });
+    } catch (error) {
+      // The policy check below records the safe rejection if the local gate cannot be read or approved.
+    }
+  }
+
+  _authorizationChecks(task) {
+    this._bootstrapDefaultLocalKyc(task);
+    const candidate = task.quote?.lockedSnapshot;
+    const intent = task.request?.intent;
+    const quoteFresh = Boolean(candidate?.quoteExpiresAt) && Date.parse(candidate.quoteExpiresAt) > this.clock().getTime();
+    const line = task.quote?.lineSnapshot?.[0];
+    const snapshotMatches = Boolean(line && task.quote?.snapshotHash && stableSnapshotHash({ quoteId: task.quote.quoteId, cartId: task.quote.cartId, lineSnapshot: task.quote.lineSnapshot, quoteExpiresAt: task.quote.quoteExpiresAt }) === task.quote.snapshotHash);
+    const exactTotal = Boolean(candidate)
+      && candidate.currency === task.currency
+      && candidate.currency === CURRENCY
+      && candidate.totalMinor === candidate.subtotalMinor + candidate.shippingMinor + candidate.taxMinor
+      && task.quote?.totalMinor === candidate.totalMinor
+      && task.quote?.currency === candidate.currency
+      && line?.totalMinor === candidate.totalMinor
+      && line?.currency === candidate.currency
+      && snapshotMatches;
+    const kycProjection = this.getKycProjection();
+    const kycStatus = task.scenario === 'pending-kyc' ? 'pending' : task.scenario === 'rejected-kyc' ? 'rejected' : kycProjection.status;
+    const walletBalance = task.wallet?.balanceMinor ?? this.store.data.wallets[task.walletId]?.balanceMinor ?? null;
+    const sufficientFunding = task.scenario !== 'insufficient-funds' && task.scenario !== 'insufficient-funding' && task.scenario !== 'low-balance' && Number.isSafeInteger(walletBalance) && walletBalance >= (candidate?.totalMinor ?? Number.MAX_SAFE_INTEGER);
+    const merchantAllowed = Boolean(candidate) && APPROVED_MERCHANT_IDS.has(candidate.merchantId) && APPROVED_PRODUCT_CATEGORIES.has(candidate.productCategory);
+    const requestRiskSignal = /\b(?:bypass|ignore|evade|credential|password|pan|cvv|real money|cash|weapon|drug)\b/i.test(task.request?.raw || '');
+    const riskClear = !['risk-block', 'policy-block', 'merchant-category-violation', 'duplicate-instruction'].includes(task.scenario) && !requestRiskSignal;
+    const uniqueCandidate = task.recommendation?.status === 'clear' && task.recommendation?.autoSelectable === true && Boolean(task.quote?.selectedCandidateId);
+    const quantityAllowed = intent?.quantity === 1;
+    const budgetAllowed = Boolean(candidate) && candidate.totalMinor <= task.spendingCeilingMinor;
+    return {
+      validIntent: { status: intent?.productCategory && intent.currency === CURRENCY ? 'passed' : 'failed', reason: intent?.productCategory ? 'The request has a supported product type and currency.' : 'The request does not contain a supported product type.' },
+      eligibleUniqueCandidate: { status: uniqueCandidate ? 'passed' : 'failed', reason: uniqueCandidate ? 'Exactly one clear eligible candidate was selected.' : 'The request has no unique eligible candidate; an explicit choice is required.' },
+      freshAuthoritativeQuote: { status: quoteFresh ? 'passed' : 'failed', reason: quoteFresh ? 'The locked local quote is still fresh.' : 'The authoritative quote is stale or expired.' },
+      exactCurrencyAndTotal: { status: exactTotal ? 'passed' : 'failed', reason: exactTotal ? 'Currency and quote arithmetic match the locked snapshot exactly.' : 'Currency or quote arithmetic did not match the locked snapshot.' },
+      withinBudget: { status: budgetAllowed ? 'passed' : 'failed', reason: budgetAllowed ? 'The exact quoted total is within the task spending ceiling.' : 'The exact quoted total exceeds the task spending ceiling.' },
+      inventoryReserved: { status: task.inventory?.reservation?.status === 'reserved' ? 'passed' : 'failed', reason: task.inventory?.reservation?.status === 'reserved' ? 'One unit is held by an active inventory lease.' : 'Inventory is not reserved.' },
+      approvedKyc: { status: kycStatus === 'approved' ? 'passed' : 'failed', reason: kycStatus === 'approved' ? 'The local KYC gate is approved.' : `The local KYC gate is ${kycStatus}; approval is required before card issuance.` },
+      sufficientFunding: { status: sufficientFunding ? 'passed' : 'failed', reason: sufficientFunding ? 'The authoritative simulated wallet covers the exact total.' : 'The simulated wallet does not cover the exact total.' },
+      allowedMerchantCategory: { status: merchantAllowed ? 'passed' : 'failed', reason: merchantAllowed ? 'The merchant and product category are in the approved local scope.' : 'The merchant or product category is outside the approved local scope.' },
+      quantityPolicy: { status: quantityAllowed ? 'passed' : 'failed', reason: quantityAllowed ? 'The one-purchase quantity is exactly one.' : 'This authorization permits one unit only.' },
+      riskPolicy: { status: riskClear ? 'passed' : 'failed', reason: riskClear ? 'No local risk or policy block is active.' : 'A local risk or policy block is active.' }
+    };
+  }
+
   _updateFinancial(taskId, { payment = null, compensation = null, outcome = null } = {}) {
     this.store.transaction((data) => {
       const task = data.tasks[taskId];
@@ -2218,6 +2435,17 @@ class NaviPaySandboxService {
       this._complete(taskId, 'intent', { status: 'interpreted', reference: stableReference('INTENT', task.id) }, stableReference('INTENT', task.id));
       this._recordStageAudit(taskId, 'intent', 'intent.interpreted', 'success', `Interpreted request as ${task.request.intent.productCategory || 'an unspecified product category'}.`, { operationId: opId, intent: task.request.intent });
       this._updateTask(taskId, (current) => { current.state = 'intent_interpreted'; });
+      if (task.request.intent.quantity !== 1) {
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'QUANTITY_UNSUPPORTED', reason: 'Authorization is limited to one unit per instruction.', checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, quantityPolicy: { status: 'failed', reason: 'This authorization permits one unit only.' } } });
+        this._fail(taskId, 'intent', 'QUANTITY_UNSUPPORTED', 'This local authorization permits one unit per purchase instruction.');
+        return this._response(taskId, 409);
+      }
+      if (task.scenario === 'missing-product-type' || (task.request.intent.brand && !task.request.intent.productCategory)) {
+        const reason = 'The instruction names a brand but not a product type. NaviPay will not guess the category.';
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'MISSING_PRODUCT_TYPE', reason, checks: { validIntent: { status: 'failed', reason } } });
+        this._fail(taskId, 'intent', 'MISSING_PRODUCT_TYPE', reason);
+        return this._response(taskId, 409);
+      }
     }
 
     task = this.getTask(taskId);
@@ -2229,12 +2457,14 @@ class NaviPaySandboxService {
           ? this._blockedTargetFallback(task)
           : this.discoveryAdapter.discover({ operationId: opId, taskId, request: task.request, scenario: task.scenario, targetSite: task.targetSite?.url || null, targetSiteBlocked: false });
       } catch (error) {
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: error.code || 'DISCOVERY_FAILED', reason: error.message || 'The local merchant sandbox could not be searched.', checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason: error.message || 'No eligible candidate was returned.' } } });
         this._fail(taskId, 'discovery', error.code || 'DISCOVERY_FAILED', error.message || 'The local merchant sandbox could not be searched.');
         return this._response(taskId, error.code === 'NO_LOCAL_MATCHES' ? 409 : 502);
       }
       const constrainedCandidates = (result.candidates || []).filter((candidate) => matchesHardIntent(candidate, task.request.intent));
       if (!constrainedCandidates.length) {
-        this._fail(taskId, 'discovery', 'NO_LOCAL_MATCHES', 'No approved candidate matched the requested brand and category. Nothing was charged.');
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'NO_LOCAL_MATCHES', reason: 'No approved local candidate matched the requested brand, product, and category. Nothing was charged.', checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason: 'No candidate satisfied the hard constraints.' } } });
+        this._fail(taskId, 'discovery', 'NO_LOCAL_MATCHES', 'No approved candidate matched the requested brand, product, and category. Nothing was charged.');
         return this._response(taskId, 409);
       }
       result = { ...result, candidates: constrainedCandidates, recommendedCandidateId: constrainedCandidates.some((candidate) => candidate.id === result.recommendedCandidateId) ? result.recommendedCandidateId : constrainedCandidates[0].id };
@@ -2269,13 +2499,17 @@ class NaviPaySandboxService {
       this._complete(taskId, 'discovery', result, result.discoveredAt);
       this._recordStageAudit(taskId, 'discovery', 'discovery.completed', 'success', `Found ${result.candidates.length} simulated in-catalog candidates.`, result);
       if (result.recommendationOnly) {
-        if (['ambiguity', 'ambiguous'].includes(task.scenario)) {
+        if (['ambiguity', 'ambiguous', 'ambiguous-same-brand'].includes(task.scenario)) {
+          const reason = task.scenario === 'ambiguous-same-brand'
+            ? 'Two equally eligible candidates from the requested brand remain. Choose one before any inventory or payment action.'
+            : 'This local scenario intentionally contains an ambiguity. Choose one result before any inventory or payment action.';
           this._updateTask(taskId, (current) => {
-            current.recommendation = { status: 'ambiguous', candidateId: null, reason: 'This local scenario intentionally contains an ambiguity. Choose one result before any inventory or payment action.', autoSelectable: false };
+            current.recommendation = { status: 'ambiguous', candidateId: null, reason, autoSelectable: false };
             current.quote.recommendation = current.recommendation;
             current.state = 'awaiting_selection';
             current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Choose one result to continue.' };
           });
+          this._recordAuthorizationDecision(taskId, { status: 'paused', code: 'AMBIGUOUS_MATCH', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason } } });
           return this._response(taskId);
         }
         const selection = selectClearWinner(result.candidates, { ceilingMinor: task.spendingCeilingMinor });
@@ -2285,21 +2519,24 @@ class NaviPaySandboxService {
           const message = hasInStock
             ? 'Every browser candidate exceeds the task spending ceiling; no purchase was attempted.'
             : 'The approved site has no in-stock candidate for this request; no purchase was attempted.';
+          this._recordAuthorizationDecision(taskId, { status: 'rejected', code, reason: message, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason: hasInStock ? 'Every in-stock candidate is over budget.' : 'No in-stock candidate is available.' }, withinBudget: { status: hasInStock ? 'failed' : 'not_run', reason: message } } });
           this._fail(taskId, hasInStock ? 'quote' : 'inventory', code, message);
           return this._response(taskId, 409);
         }
         if (selection.status === 'ambiguous') {
+          const reason = `${selection.reason} Choose an item in Advanced details to continue.`;
           this._updateTask(taskId, (current) => {
             current.recommendation = {
               status: 'ambiguous',
               candidateId: null,
-              reason: `${selection.reason} Choose an item in Advanced details to continue.`,
+              reason,
               autoSelectable: false
             };
             current.quote.recommendation = current.recommendation;
             current.state = 'awaiting_selection';
             current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Choose one of the tied browser results to cross-check the approved local quote.' };
           });
+          this._recordAuthorizationDecision(taskId, { status: 'paused', code: 'AMBIGUOUS_MATCH', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason } } });
           return this._response(taskId);
         }
         candidateId = selection.candidate.id;
@@ -2352,11 +2589,13 @@ class NaviPaySandboxService {
       const available = inStock.filter((candidate) => candidate.totalMinor <= task.spendingCeilingMinor);
       const recommended = candidates.find((candidate) => candidate.id === task.quote.recommendedCandidateId);
       const overBudget = inStock.length > 0 && available.length === 0;
+      const [best, runnerUp] = available;
+      const tied = Boolean(best && runnerUp && best.relevanceScore === runnerUp.relevanceScore && (task.request.intent.brand || task.request.intent.product));
       const recommendation = {
-        status: recommended?.availability === 'in_stock' && recommended.totalMinor <= task.spendingCeilingMinor ? 'clear' : (available.length ? 'fallback_available' : 'unavailable'),
-        candidateId: available[0]?.id || recommended?.id || null,
-        reason: available.length ? 'Best clear match from the seeded merchant sandbox, within the task budget.' : overBudget ? 'Every in-stock match is over the task budget.' : 'No in-stock candidate is available in the local merchant sandbox.',
-        autoSelectable: available.length > 0
+        status: overBudget ? 'unavailable' : !available.length ? 'unavailable' : tied ? 'ambiguous' : 'clear',
+        candidateId: best?.id || recommended?.id || null,
+        reason: available.length && !tied ? 'One clear in-stock match satisfies the hard constraints and task budget.' : tied ? 'Multiple equally eligible in-stock candidates remain; an explicit choice is required.' : overBudget ? 'Every in-stock match is over the task budget.' : 'No in-stock candidate is available in the local merchant sandbox.',
+        autoSelectable: available.length > 0 && !tied
       };
       this._updateTask(taskId, (current) => {
         current.recommendation = recommendation;
@@ -2365,12 +2604,27 @@ class NaviPaySandboxService {
         current.budget = { ...current.budget, status: overBudget ? 'over_budget' : available.length ? 'within_budget' : 'no_match' };
       });
       if (overBudget) {
-        this._fail(taskId, 'quote', 'SPENDING_CEILING_EXCEEDED', 'Every in-stock match exceeds the task budget; no inventory or payment action was attempted.');
+        const reason = 'Every in-stock match exceeds the task budget; no inventory or payment action was attempted.';
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'SPENDING_CEILING_EXCEEDED', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, withinBudget: { status: 'failed', reason } } });
+        this._fail(taskId, 'quote', 'SPENDING_CEILING_EXCEEDED', reason);
         return this._response(taskId, 409);
       }
       if (!inStock.length) {
-        this._fail(taskId, 'inventory', 'OUT_OF_STOCK', 'No in-stock local item matched this request; no inventory or payment action was attempted.');
+        const reason = 'No in-stock local item matched this request; no inventory or payment action was attempted.';
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'OUT_OF_STOCK', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason } } });
+        this._fail(taskId, 'inventory', 'OUT_OF_STOCK', reason);
         return this._response(taskId, 409);
+      }
+      if (tied) {
+        const reason = `${recommendation.reason} Choose an item in Advanced details to continue.`;
+        this._updateTask(taskId, (current) => {
+          current.recommendation = { ...current.recommendation, reason, autoSelectable: false };
+          current.quote.recommendation = current.recommendation;
+          current.state = 'awaiting_selection';
+          current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Choose one of the equally eligible candidates before authorization.' };
+        });
+        this._recordAuthorizationDecision(taskId, { status: 'paused', code: 'AMBIGUOUS_MATCH', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason } } });
+        return this._response(taskId);
       }
     }
 
@@ -2380,12 +2634,21 @@ class NaviPaySandboxService {
         if (candidateId && task.quote.candidates.some((candidate) => candidate.id === candidateId && candidate.availability === 'in_stock')) {
           // An explicit available candidate can still rescue an ambiguous catalog response.
         } else if (task.scenario === 'out-of-stock') {
-          this._fail(taskId, 'inventory', 'OUT_OF_STOCK', 'The recommended local catalog item is out of stock; no inventory was reserved.');
+          const reason = 'The recommended local catalog item is out of stock; no inventory was reserved.';
+          this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'OUT_OF_STOCK', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason } } });
+          this._fail(taskId, 'inventory', 'OUT_OF_STOCK', reason);
           return this._response(taskId, 409);
         } else {
           this._updateTask(taskId, (current) => { current.state = 'awaiting_selection'; current.automation = { ...current.automation, status: 'awaiting_selection', automatic: false, nextAction: 'Choose an available candidate and resume this purchase.' }; });
           return this._response(taskId);
         }
+      }
+      if (candidateId && task.recommendation && !task.recommendation.autoSelectable) {
+        this._updateTask(taskId, (current) => {
+          current.recommendation = { ...current.recommendation, status: 'clear', candidateId, autoSelectable: true, reason: 'The user explicitly selected one candidate from an otherwise ambiguous result.' };
+          if (current.quote) current.quote.recommendation = current.recommendation;
+        });
+        task = this.getTask(taskId);
       }
       const selected = task.quote.candidates.find((candidate) => candidate.id === (candidateId || task.recommendation.candidateId));
       if (!selected) {
@@ -2393,7 +2656,9 @@ class NaviPaySandboxService {
         return this._response(taskId, 422);
       }
       if (selected.availability !== 'in_stock') {
-        this._fail(taskId, 'inventory', 'OUT_OF_STOCK', 'The selected local catalog item is out of stock; no payment was attempted.');
+        const reason = 'The selected local catalog item is out of stock; no payment was attempted.';
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'OUT_OF_STOCK', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, eligibleUniqueCandidate: { status: 'failed', reason } }, candidate: selected });
+        this._fail(taskId, 'inventory', 'OUT_OF_STOCK', reason);
         return this._response(taskId, 409);
       }
       const quoteOp = this._begin(taskId, 'quote');
@@ -2427,6 +2692,13 @@ class NaviPaySandboxService {
     }
 
     task = this.getTask(taskId);
+    if (task.quote?.lockedSnapshot?.quoteExpiresAt && Date.parse(task.quote.lockedSnapshot.quoteExpiresAt) <= this.clock().getTime()) {
+      const reason = 'The authoritative quote expired before inventory reservation and card issuance; no payment was attempted.';
+      this._updateTask(taskId, (current) => { if (current.quote) current.quote.quoteStatus = 'expired'; });
+      this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'QUOTE_EXPIRED', reason, checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, freshAuthoritativeQuote: { status: 'failed', reason } }, candidate: task.quote.lockedSnapshot });
+      this._fail(taskId, 'quote', 'QUOTE_EXPIRED', reason);
+      return this._response(taskId, 409);
+    }
     if (!task.inventory) {
       const invOp = this._begin(taskId, 'inventory');
       const reservation = this.inventoryAdapter.reserve({ operationId: invOp, taskId, candidate: task.quote.lockedSnapshot, quoteId: task.quote.quoteId, snapshotHash: task.quote.snapshotHash, scenario: task.scenario });
@@ -2462,18 +2734,56 @@ class NaviPaySandboxService {
 
     task = this.getTask(taskId);
     if (task.quote?.lockedSnapshot?.quoteExpiresAt && Date.parse(task.quote.lockedSnapshot.quoteExpiresAt) <= this.clock().getTime()) {
+      const reason = 'The locked quote expired before issuer authorization; no payment was attempted.';
       this._updateTask(taskId, (current) => { if (current.quote) current.quote.quoteStatus = 'expired'; });
       this._releaseReservation(taskId, 'quote expired before issuer authorization');
-      this._fail(taskId, 'quote', 'QUOTE_EXPIRED', 'The locked quote expired before issuer authorization; no payment was attempted.');
+      this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'QUOTE_EXPIRED', reason, checks: { freshAuthoritativeQuote: { status: 'failed', reason } }, candidate: task.quote.lockedSnapshot });
+      this._fail(taskId, 'quote', 'QUOTE_EXPIRED', reason);
       return this._response(taskId, 409);
     }
+
+    const authorizationChecks = this._authorizationChecks(task);
+    const failedAuthorizationCheck = Object.entries(authorizationChecks).find(([, check]) => check.status === 'failed');
+    if (failedAuthorizationCheck) {
+      const [failedName, failedCheck] = failedAuthorizationCheck;
+      const codeByCheck = {
+        validIntent: 'INVALID_PURCHASE_REQUEST',
+        eligibleUniqueCandidate: 'AMBIGUOUS_MATCH',
+        freshAuthoritativeQuote: 'QUOTE_EXPIRED',
+        exactCurrencyAndTotal: 'AUTHORITATIVE_QUOTE_MISMATCH',
+        withinBudget: 'SPENDING_CEILING_EXCEEDED',
+        inventoryReserved: 'INVENTORY_NOT_RESERVED',
+        approvedKyc: 'KYC_NOT_APPROVED',
+        sufficientFunding: 'INSUFFICIENT_FUNDS',
+        allowedMerchantCategory: 'MERCHANT_CATEGORY_NOT_ALLOWED',
+        quantityPolicy: 'QUANTITY_UNSUPPORTED',
+        riskPolicy: 'POLICY_BLOCKED'
+      };
+      const code = task.scenario === 'duplicate-instruction' ? 'DUPLICATE_INSTRUCTION' : task.scenario === 'merchant-category-violation' ? 'MERCHANT_CATEGORY_NOT_ALLOWED' : codeByCheck[failedName] || 'AUTHORIZATION_REJECTED';
+      const status = failedName === 'approvedKyc' && task.scenario === 'pending-kyc' ? 'paused' : 'rejected';
+      this._recordAuthorizationDecision(taskId, { status, code, reason: failedCheck.reason, checks: authorizationChecks, candidate: task.quote.lockedSnapshot });
+      this._releaseReservation(taskId, `authorization ${code.toLowerCase()}`);
+      this._fail(taskId, failedName === 'approvedKyc' ? 'funding' : failedName === 'sufficientFunding' ? 'funding' : failedName === 'inventoryReserved' ? 'inventory' : 'quote', code, failedCheck.reason);
+      return this._response(taskId, code === 'INSUFFICIENT_FUNDS' ? 402 : 409);
+    }
+    this._recordAuthorizationDecision(taskId, {
+      status: 'approved',
+      code: 'AUTHORIZATION_APPROVED',
+      reason: 'Approved one-purchase authorization: the unique fresh local quote, reserved inventory, approved KYC, exact XSGD budget, merchant scope, and fake-wallet balance all passed.',
+      checks: authorizationChecks,
+      candidate: task.quote.lockedSnapshot
+    });
+    this._updateTask(taskId, (current) => { current.state = 'authorization_approved'; });
+
     if (!task.card && task.paymentMode !== 'legacy_direct_wallet') {
       const issueOp = this._begin(taskId, 'payment');
       this._transition(taskId, 'card_issuing', 'card_issuing', 'Issuing a task-scoped disposable card.', { operationId: issueOp, status: 'info' });
       let issued;
       try {
         const locked = task.quote.lockedSnapshot;
-        issued = this.issuerAdapter.issue({ operationId: `op_${taskId}_card_issuing`, taskId, scenario: task.scenario, scope: { ...locked, walletId: task.walletId, mcc: locked.mcc || '5732', amountMinor: locked.totalMinor } });
+        const authorized = task.authorizationDecision?.candidate || locked;
+        const approvedScope = { ...locked, merchantId: authorized.merchantId, merchant: authorized.merchant, merchantDomain: authorized.merchantDomain, amountMinor: authorized.amountMinor ?? locked.totalMinor, currency: authorized.currency || locked.currency, mcc: authorized.mcc || locked.mcc || '5732', walletId: task.walletId };
+        issued = this.issuerAdapter.issue({ operationId: `op_${taskId}_card_issuing`, taskId, scenario: task.scenario, scope: approvedScope });
         this._updateTask(taskId, (current) => {
           const safeCard = { cardId: issued.cardId, reference: issued.reference, lastFour: String(issued.reference).slice(-4), status: issued.status, issuedAt: issued.issuedAt, scope: issued.scope, captureCount: issued.captureCount || 0, maskedReference: `•••• ${String(issued.reference).slice(-4)}`, retiredAt: null };
           current.card = safeCard;
@@ -2499,7 +2809,9 @@ class NaviPaySandboxService {
     }
     if (task.card && !task.payment && task.paymentMode !== 'legacy_direct_wallet' && typeof this.issuerAdapter.hasCapability === 'function' && !this.issuerAdapter.hasCapability(task.card.cardId)) {
       try {
-        this.issuerAdapter.issue({ operationId: `op_${taskId}_card_issuing`, taskId, scenario: task.scenario, scope: { ...task.quote.lockedSnapshot, walletId: task.walletId, mcc: task.quote.lockedSnapshot.mcc || '5732', amountMinor: task.quote.lockedSnapshot.totalMinor } });
+        const locked = task.quote.lockedSnapshot;
+        const authorized = task.authorizationDecision?.candidate || locked;
+        this.issuerAdapter.issue({ operationId: `op_${taskId}_card_issuing`, taskId, scenario: task.scenario, scope: { ...locked, merchantId: authorized.merchantId, merchant: authorized.merchant, merchantDomain: authorized.merchantDomain, amountMinor: authorized.amountMinor ?? locked.totalMinor, currency: authorized.currency || locked.currency, mcc: authorized.mcc || locked.mcc || '5732', walletId: task.walletId } });
         this._recordStageAudit(taskId, 'payment', 'card_capability.restored', 'info', 'The process-local disposable card capability was recreated after reload; no credential was persisted.', { reference: task.card.reference });
       } catch (error) {
         this._releaseReservation(taskId, 'card capability unavailable after reload');
@@ -2517,7 +2829,7 @@ class NaviPaySandboxService {
       try {
         checkout = task.paymentMode === 'legacy_direct_wallet'
           ? { status: 'authorized', payment: this.walletAdapter.transfer({ operationId: paymentOp, taskId, walletId: task.walletId, merchantId: task.quote.merchantId, amountMinor: task.quote.totalMinor, currency: task.currency, scenario: task.scenario }), merchantDomain: task.quote.merchantDomain, amountMinor: task.quote.totalMinor, currency: task.currency, reference: stableReference('LEGACY-CHECKOUT', task.id), authorizationReference: null, captureReference: null }
-          : this.merchantCheckoutAdapter.execute({ operationId: `op_${taskId}_checkout_submit`, taskId, cardId: task.card.cardId, scope: { ...task.quote.lockedSnapshot, amountMinor: task.quote.totalMinor, walletId: task.walletId, delivery: task.customer, mcc: task.quote.lockedSnapshot.mcc || '5732' }, scenario: task.scenario });
+          : this.merchantCheckoutAdapter.execute({ operationId: `op_${taskId}_checkout_submit`, taskId, cardId: task.card.cardId, scope: { ...task.quote.lockedSnapshot, ...(task.authorizationDecision?.candidate ? { merchantId: task.authorizationDecision.candidate.merchantId, merchant: task.authorizationDecision.candidate.merchant, merchantDomain: task.authorizationDecision.candidate.merchantDomain, mcc: task.authorizationDecision.candidate.mcc } : {}), amountMinor: task.authorizationDecision?.candidate?.amountMinor ?? task.quote.totalMinor, walletId: task.walletId, delivery: task.customer, mcc: task.authorizationDecision?.candidate?.mcc || task.quote.lockedSnapshot.mcc || '5732' }, scenario: task.scenario });
       } catch (error) {
         let retired = null;
         if (this.issuerAdapter.retire && task.card) retired = this.issuerAdapter.retire({ operationId: `op_${taskId}_card_retired`, taskId, cardId: task.card.cardId, reason: 'checkout_worker_failed' });
@@ -2537,7 +2849,7 @@ class NaviPaySandboxService {
         this._setProgress(taskId, 'payment', 'unknown', { detail: 'authorization_pending', reference: checkout.checkoutReference });
         this._transition(taskId, 'authorization_pending', 'authorization_pending', 'Checkout returned an unknown authorization or capture result. Blind retry is blocked.', { operationId: `op_${taskId}_card_capture`, reference: checkout.checkoutReference, status: 'warning' });
         this._transition(taskId, 'reconciliation_required');
-        this._updateTask(taskId, (current) => { current.automation = { ...current.automation, status: 'awaiting_reconciliation', nextAction: 'Reconcile the issuer result. Checkout will not be retried automatically.' }; });
+        this._updateTask(taskId, (current) => { if (current.card) current.card.status = 'pending_reconciliation'; current.automation = { ...current.automation, status: 'awaiting_reconciliation', nextAction: 'Reconcile the issuer result. Checkout will not be retried automatically.' }; });
         return this._response(taskId);
       }
       if (checkout.status !== 'authorized') {
@@ -2845,6 +3157,9 @@ class NaviPaySandboxService {
 module.exports = {
   CATALOG,
   DEFAULT_ADAPTER_TIMEOUT_MS,
+  TASK_CEILING_MINOR,
+  DEFAULT_PURCHASE_PURPOSE,
+  APPROVED_MERCHANT_SCOPE,
   DEMO_CUSTOMER,
   DEMO_WALLET,
   SANDBOX_MODE,

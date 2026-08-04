@@ -109,9 +109,19 @@ Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaym
 
 The server entrypoint is `src/server.js`. The product orchestration and adapter contracts are in `src/sandbox.js`. The JSON store is in `src/store.js`.
 
+## Bounded one-instruction authorization policy
+
+The primary purchase endpoint treats the instruction as a local authorization request, not as unrestricted shopping permission. NaviPay preserves the original text and a normalized envelope containing the brand, product, category, quantity, explicit budget or default XSGD 1,000 ceiling, currency, approved seeded merchant scope, and one-purchase purpose. Hard brand, product, and category constraints are never substituted.
+
+A purchase can receive an `AUTHORIZATION_APPROVED` decision only when the request is valid, one unique in-stock candidate is selected, the authoritative quote is fresh and internally consistent, the exact XSGD total is within budget, inventory is reserved, the local mock KYC gate is approved, the simulated wallet covers the total, the merchant and category are allowlisted, and no local risk or policy block is active. A tie, missing product type, exact out-of-stock result, stale quote, over-budget total, KYC or funding gate, duplicate, or policy violation receives a persisted redacted pause or rejection decision. Card issuance, capture, ledger debit, and order creation are downstream of that decision.
+
+The default local demo may bootstrap the pending mock KYC fixture through a deterministic simulated approval when a concrete one-instruction run starts, so the visible demo remains automatic. This is not identity verification and cannot authorize real funds. The explicit `pending-kyc` and `rejected-kyc` fixtures exercise the hard stop without issuing a card. The authorization decision and envelope are safe browser projections and contain no PAN, CVV, provider payload, or secret.
+
+This policy is a local-only simulation. The seeded merchant, fake wallet, mock KYC, local funding, issuer, checkout worker, order, fulfillment, and delivery adapters are replaceable seams for future provider adapters. No real provider credentials, KYC claims, funds, external checkout, Amazon scraping, or live StraitsX calls are enabled.
+
 ## Recovery scenarios
 
-The server supports deterministic local scenarios for integration testing: `no-match`, `over-budget`, `ambiguity`, `low-balance`, `insufficient-funds`, `payment-decline`, `decline`, `unknown-payment`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `duplicate`, `browser-crash`, `card-issued-before-checkout`, `order-failure`, `order-commit-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
+The server supports deterministic local scenarios for integration testing: `no-match`, `over-budget`, `ambiguity`, `ambiguous-same-brand`, `missing-product-type`, `pending-kyc`, `rejected-kyc`, `insufficient-funding`, `merchant-category-violation`, `policy-block`, `risk-block`, `duplicate-instruction`, `stale-quote`, `low-balance`, `insufficient-funds`, `payment-decline`, `decline`, `unknown-payment`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `duplicate`, `browser-crash`, `card-issued-before-checkout`, `order-failure`, `order-commit-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
 
 - No-match, over-budget, ambiguity, exact out-of-stock, low-balance, and payment decline outcomes stop before an unconfirmed payment and show explicit task-scoped results.
 - Insufficient funds and payment decline release the reservation and create no ledger entries.
