@@ -12,7 +12,7 @@ async function withHttpService(callback) {
   const server = createServer({ service });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    return await callback(`http://127.0.0.1:${server.address().port}`);
+    return await callback(`http://127.0.0.1:${server.address().port}`, service);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -40,6 +40,48 @@ test('HTTP no-match is task-scoped and cannot display a prior purchase balance o
     assert.equal(noMatch.payload.projection.wallet, null);
     assert.deepEqual(noMatch.payload.projection.progress.filter((item) => ['inventory', 'payment', 'order', 'fulfillment', 'delivery', 'receipt'].includes(item.stage)).map((item) => item.status), ['skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped']);
     assert.notEqual(noMatch.payload.projection.financial.finalBalanceMinor, success.payload.projection.financial.finalBalanceMinor);
+  });
+});
+
+test('HTTP reconciliation uses the definitive insufficient result after a wallet-balance race', async () => {
+  await withHttpService(async (base, service) => {
+    const unknown = await post(base, 'race-unknown', { request: 'I want earphones', scenario: 'unknown-payment' });
+    const taskId = unknown.payload.task.id;
+    assert.equal(unknown.payload.task.state, 'reconciliation_required');
+
+    // These are ordinary user purchases that change the shared wallet while
+    // the first issuer capture remains unknown. The requested authorized
+    // resolution is now definitively insufficient at the adapter boundary.
+    const keyboard = await post(base, 'race-keyboard', { request: 'I want a keyboard' });
+    const mouse = await post(base, 'race-mouse', { request: 'I want a mouse' });
+    assert.equal(keyboard.payload.task.state, 'completed');
+    assert.equal(mouse.payload.task.state, 'completed');
+
+    const response = await fetch(`${base}/api/tasks/${taskId}/payment/reconcile`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'race-reconcile' },
+      body: JSON.stringify({ resolution: 'authorized' })
+    });
+    const payload = await response.json();
+    const task = payload.task;
+    assert.equal(response.status, 200);
+    assert.equal(task.state, 'failed');
+    assert.equal(task.payment.status, 'declined');
+    assert.equal(task.failure.stage, 'payment');
+    assert.equal(task.failure.code, 'INSUFFICIENT_FUNDS');
+    assert.equal(task.card.status, 'retired');
+    assert.equal(task.card.captureCount, 0);
+    assert.equal(task.inventory.reservation.status, 'released');
+    assert.equal(task.order, null);
+    assert.equal(task.financial.outcome, 'declined');
+    assert.equal(task.financial.netChargedMinor, 0);
+    assert.equal(task.financial.finalBalanceMinor, 50000);
+    assert.equal(task.progress.find((item) => item.stage === 'payment').status, 'failed');
+    assert.equal(task.progress.find((item) => item.stage === 'merchant_credit').status, 'skipped');
+    assert.equal(task.progress.find((item) => item.stage === 'order').status, 'skipped');
+    assert.equal(service.getWalletLedger().filter((entry) => entry.taskId === taskId).length, 0);
+    assert.equal(service.lookupOperation(`op_${taskId}_card_capture`).status, 'declined');
+    assert.doesNotMatch(JSON.stringify(payload), /pan|cvv|cardNumber|rawProviderPayload|credentials/i);
   });
 });
 

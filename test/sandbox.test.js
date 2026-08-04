@@ -93,6 +93,41 @@ test('unknown payment holds stock and reconciles once without a blind retry', ()
   assert.equal(service.getWalletLedger().length, 2);
 });
 
+test('reconciliation resolves from persisted adapter truth after restart without retrying capture', () => {
+  for (const resolution of ['authorized', 'declined']) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `navipay-reconcile-${resolution}-`));
+    const filePath = path.join(directory, 'state.json');
+    try {
+      const first = makeService(new JsonStore(filePath));
+      const unknown = run(first, 'I want earphones', 'timeout', `restart-unknown-${resolution}`);
+      const taskId = unknown.body.task.id;
+      assert.equal(unknown.body.task.state, 'reconciliation_required');
+      assert.equal(first.getWalletLedger().length, 0);
+
+      const second = makeService(new JsonStore(filePath));
+      const reconciled = second.reconcilePayment(taskId, `restart-reconcile-${resolution}`, resolution);
+      const task = reconciled.body.task;
+      assert.equal(task.payment.status, resolution);
+      assert.equal(second.issuerAdapter.calls.reconcile, 1);
+      assert.equal(second.getWalletLedger().length, resolution === 'authorized' ? 2 : 0);
+      if (resolution === 'authorized') {
+        assert.equal(task.state, 'completed');
+        assert.equal(task.order.status, 'confirmed');
+        assert.equal(task.card.captureCount, 1);
+      } else {
+        assert.equal(task.state, 'failed');
+        assert.equal(task.failure.stage, 'payment');
+        assert.equal(task.inventory.reservation.status, 'released');
+        assert.equal(task.order, null);
+        assert.equal(task.card.captureCount, 0);
+      }
+      assert.doesNotMatch(JSON.stringify({ task, projection: second.getTaskProjection(taskId) }), /pan|cvv|cardNumber|rawProviderPayload|credentials/i);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test('order and merchant-credit failures persist truthful compensation snapshots', () => {
   for (const scenario of ['order-failure', 'merchant-credit-failure']) {
     const service = makeService();
