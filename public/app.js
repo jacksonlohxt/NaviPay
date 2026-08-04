@@ -26,6 +26,10 @@ function formatMoney(minor, currency = 'XSGD') {
   return `${currency} ${(minor / 100).toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function formatSnapshotMoney(minor, currency = 'XSGD', fallback = 'No task snapshot') {
+  return Number.isFinite(minor) ? formatMoney(minor, currency) : fallback;
+}
+
 function formatDate(value) {
   if (!value) return 'Not available';
   const date = new Date(value);
@@ -261,7 +265,7 @@ function receiptPanel(task) {
   if (!receipt || receipt.status !== 'confirmed') return '';
   const currency = receipt.currency || task.currency || 'XSGD';
   const balance = receipt.finalBalanceMinor ?? receipt.balanceAfterPaymentMinor;
-  return `<section class="receipt-card" aria-labelledby="receipt-heading"><div class="receipt-top"><div><span class="overline ink-overline">Receipt</span><h2 id="receipt-heading">${escapeHtml(receipt.item || 'Item')}</h2><p>${escapeHtml(receipt.merchant || 'Merchant')}${receipt.variant ? ` · ${escapeHtml(receipt.variant)}` : ''}</p></div><strong class="receipt-total">${moneyFor(receipt.totalMinor ?? receipt.amountMinor, currency)}</strong></div><div class="receipt-facts">${dataCell('Item', moneyFor(receipt.subtotalMinor, currency))}${dataCell('Shipping + tax', `${moneyFor(receipt.shippingMinor, currency)} + ${moneyFor(receipt.taxMinor, currency)}`)}${dataCell('Balance left', moneyFor(balance, currency), `before ${moneyFor(receipt.balanceBeforeMinor, currency)}`)}</div><p class="receipt-result"><span>✓</span> Paid and confirmed <span class="receipt-reference">${escapeHtml(shortId(receipt.id))}</span></p><p class="receipt-disclosure">${escapeHtml(receipt.disclosure || 'SIMULATED receipt - local fake wallet and merchant gateway only.')}</p></section>`;
+  return `<section class="receipt-card" aria-labelledby="receipt-heading"><div class="receipt-top"><div><span class="overline ink-overline">Primary success artifact</span><h2 id="receipt-heading">${escapeHtml(receipt.item || 'Item')}</h2><p>${escapeHtml(receipt.merchant || 'Merchant')}${receipt.variant ? ` · ${escapeHtml(receipt.variant)}` : ''}</p></div><strong class="receipt-total">${moneyFor(receipt.totalMinor ?? receipt.amountMinor, currency)}</strong></div><div class="receipt-facts">${dataCell('Item', moneyFor(receipt.subtotalMinor, currency))}${dataCell('Shipping + tax', `${moneyFor(receipt.shippingMinor, currency)} + ${moneyFor(receipt.taxMinor, currency)}`)}${dataCell('Balance left', formatSnapshotMoney(balance, currency), `before ${formatSnapshotMoney(receipt.balanceBeforeMinor, currency)}`)}</div><p class="receipt-result"><span>✓</span> Paid and confirmed <span class="receipt-reference">${escapeHtml(shortId(receipt.id))}</span></p><p class="receipt-disclosure">${escapeHtml(receipt.disclosure || 'SIMULATED receipt - local fake wallet and merchant gateway only.')}</p></section>`;
 }
 
 function purchaseDetails(task) {
@@ -287,7 +291,7 @@ function receiptAdjustment(task) {
   const canAdjust = task.state === 'completed' && task.payment.status === 'authorized' && !adjustment;
   const adjustmentBody = adjustment
     ? `<p class="detail-help">The original capture snapshot remains unchanged. This records the current simulated settlement.</p><div class="state-grid">${dataCell('Current payment', statusLabel(adjustment.currentPaymentStatus))}${dataCell('Net charged', moneyFor(adjustment.netChargedMinor, currency))}${dataCell('Net refunded', moneyFor(adjustment.netRefundedMinor, currency))}${dataCell('Adjustment', statusLabel(adjustment.status))}</div><dl class="detail-list">${detailValue('Adjustment reference', shortId(adjustment.reference))}${detailValue('Ledger transaction', shortId(adjustment.transactionReference))}${detailValue('Recorded', formatDate(adjustment.occurredAt))}</dl>`
-    : canAdjust ? `<p class="detail-help">Refund or reverse this simulated capture once. The immutable receipt keeps the original capture values.</p><div class="choice-actions"><button type="button" class="small-button" data-payment-action="refund">Refund payment</button><button type="button" class="quiet-button" data-payment-action="reversal">Reverse payment</button></div>`
+    : canAdjust ? `<p class="detail-help">Refund or reverse this simulated capture once. The immutable receipt keeps the original capture values.</p><div class="choice-actions"><button type="button" class="small-button" data-payment-action="refund">Refund payment</button><button type="button" class="quiet-button" data-payment-action="reverse">Reverse payment</button></div>`
       : '<p class="detail-help">No settlement adjustment is available for this payment state.</p>';
   return `<details class="disclosure"><summary>Settlement adjustments <span>${adjustment ? statusLabel(adjustment.status) : 'refund or reversal'}</span></summary><div class="disclosure-content">${adjustmentBody}</div></details>`;
 }
@@ -360,9 +364,11 @@ function fundingPanel() {
 function cardDrawer() {
   const wallet = state.wallet || {};
   const projection = state.projection || {};
+  const financial = projection.financial || {};
   const card = projection.card || state.task?.card || {};
   const payment = projection.payment || state.task?.payment || {};
-  const balance = Number.isFinite(wallet.balanceMinor) ? moneyFor(wallet.balanceMinor, wallet.currency || 'XSGD') : 'Not available';
+  const taskBalance = financial.finalBalanceMinor ?? financial.balanceBeforeMinor;
+  const balance = state.task ? formatSnapshotMoney(taskBalance, state.task.currency || 'XSGD') : Number.isFinite(wallet.balanceMinor) ? moneyFor(wallet.balanceMinor, wallet.currency || 'XSGD') : 'Not available';
   const taskCharge = Number.isFinite(payment.amountMinor) ? moneyFor(payment.amountMinor, payment.currency || state.task?.currency) : 'None yet';
   const cardStatus = card.status || 'not_issued';
   return `<div class="drawer-backdrop" data-close-drawer><aside class="card-drawer" role="dialog" aria-modal="true" aria-label="Virtual card" data-card-drawer><div class="drawer-heading"><div><span class="overline">Virtual card</span><h2 id="drawer-heading">${escapeHtml(balance)}</h2></div><button type="button" class="close-button" aria-label="Close virtual card" data-close-drawer>✕</button></div><div class="drawer-card"><span class="drawer-card-label">NaviPay local card</span><strong>${escapeHtml(card.maskedReference || 'Issued per purchase')}</strong><span>${escapeHtml(statusLabel(cardStatus))}</span></div><div class="drawer-facts">${dataCell('This purchase', taskCharge, payment.status === 'authorized' ? 'confirmed payment' : statusLabel(payment.status || 'not_started'))}${dataCell('Card status', statusLabel(cardStatus), card.captureCount != null ? `${card.captureCount} of ${card.maxCaptures || 1} captures` : 'one-use disposable card')}${dataCell('Asset', wallet.currency || state.task?.currency || 'XSGD', 'fake wallet - no real funds')}${dataCell('Wallet', balance, 'current local balance')}</div>${cardStatus === 'active' ? '<button type="button" class="quiet-button full-button" data-card-revoke>Revoke virtual card</button>' : ''}${fundingPanel()}<details class="drawer-disclosure"><summary>Local controls <span>reset saved history</span></summary><div class="drawer-section"><p class="drawer-note">Reset clears saved simulated purchases, inventory leases, funding intents, and the fake wallet returns to its seeded state.</p><button type="button" class="quiet-button full-button" data-reset>Reset local simulation</button></div></details></aside></div>`;
@@ -616,7 +622,7 @@ function bindEvents() {
   document.querySelectorAll('[data-reset]').forEach((button) => button.addEventListener('click', resetSimulation));
   document.querySelectorAll('[data-task-id]').forEach((button) => button.addEventListener('click', () => selectTask(button.dataset.taskId)));
   document.querySelectorAll('[data-open-card]').forEach((button) => button.addEventListener('click', () => { state.cardOpen = true; render(); }));
-  document.querySelectorAll('[data-card-open]').forEach((button) => button.addEventListener('click', () => { state.cardOpen = true; render(); }));
+  document.querySelectorAll('[data-card-open], [data-open-drawer]').forEach((button) => button.addEventListener('click', () => { state.cardOpen = true; render(); }));
   document.querySelectorAll('[data-close-drawer]').forEach((button) => button.addEventListener('click', (event) => { if (event.target === button || button.classList.contains('close-button')) { state.cardOpen = false; render(); } }));
   document.querySelectorAll('[data-new-purchase]').forEach((button) => button.addEventListener('click', startAnother));
   document.querySelectorAll('[data-open-details]').forEach((button) => button.addEventListener('click', () => {
@@ -632,7 +638,7 @@ function bindEvents() {
 function headerButton() {
   const wallet = state.wallet || {};
   const amount = Number.isFinite(wallet.balanceMinor) ? formatMoney(wallet.balanceMinor, wallet.currency || 'XSGD') : 'Wallet unavailable';
-  return `<button type="button" class="wallet-chip" data-card-open aria-label="Open virtual card drawer, current balance ${escapeHtml(amount)}">CARD <strong>${escapeHtml(amount)}</strong></button>`;
+  return `<button type="button" class="wallet-chip" data-card-open data-open-drawer aria-label="Open virtual card drawer, current balance ${escapeHtml(amount)}">CARD <strong>${escapeHtml(amount)}</strong></button>`;
 }
 
 function bootHeader() {
