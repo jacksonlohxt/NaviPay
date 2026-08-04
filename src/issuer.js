@@ -255,6 +255,18 @@ class LocalFakeIssuerAdapter {
         if (current.status === 'captured') { card.captureCount += 1; card.status = 'captured'; }
         else card.status = 'retired';
       }
+      data.operations[opId] = {
+        ...(data.operations[opId] || {}),
+        id: opId,
+        taskId,
+        stage: 'card_capture',
+        status: current.status,
+        code: current.code,
+        reference: current.captureReference,
+        completedAt: current.reconciledAt,
+        updatedAt: current.reconciledAt,
+        result: clone({ ...current, payment: undefined })
+      };
       return clone(current);
     });
   }

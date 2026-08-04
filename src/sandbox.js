@@ -334,6 +334,34 @@ function operationId(taskId, stage) {
   return `op_${taskId}_${stage}`;
 }
 
+function normalizeReconciliationResult(capture, payment) {
+  const captureStatus = capture?.status;
+  const paymentStatus = payment?.status;
+  // A definitive decline wins over a contradictory authorization signal. This
+  // keeps operator intent from manufacturing a capture when the adapter knows
+  // that the wallet transfer did not happen.
+  const status = captureStatus === 'declined' || paymentStatus === 'declined'
+    ? 'declined'
+    : captureStatus === 'captured' || paymentStatus === 'authorized'
+      ? 'authorized'
+      : null;
+  if (!status) throw new AdapterError('INVALID_RECONCILIATION_RESULT', 'The payment adapter did not return a definitive reconciliation result.');
+  return {
+    status,
+    capture,
+    payment: {
+      ...(payment || {}),
+      status,
+      code: payment?.code || capture?.code || null,
+      authorizationReference: payment?.authorizationReference || capture?.authorizationReference || null,
+      captureReference: payment?.captureReference || capture?.captureReference || null,
+      amountMinor: payment?.amountMinor ?? capture?.amountMinor ?? null,
+      currency: payment?.currency || capture?.currency || null,
+      resolvedAt: payment?.resolvedAt || capture?.reconciledAt || null
+    }
+  };
+}
+
 const LIFECYCLE_STAGES = ['intent', 'discovery', 'quote', 'inventory', 'funding', 'payment', 'merchant_credit', 'order', 'fulfillment', 'delivery', 'receipt', 'audit'];
 
 function stageTemplate() {
@@ -2288,9 +2316,21 @@ class NaviPaySandboxService {
       const balanceBeforeMinor = current.balanceBeforeMinor ?? nextPayment?.balanceBeforeMinor ?? (nextPayment ? walletBalanceMinor : null);
       const afterPayment = current.balanceAfterPaymentMinor ?? nextPayment?.balanceAfterPaymentMinor ?? (nextPayment?.status === 'authorized' ? nextPayment.walletBalanceMinor : null);
       const nextCompensation = compensation || current.compensation;
-      const paymentHasSideEffect = Boolean(nextPayment) || Boolean(nextCompensation);
-      const finalBalanceMinor = paymentHasSideEffect ? walletBalanceMinor : current.finalBalanceMinor ?? task.wallet?.finalBalanceMinor ?? task.wallet?.balanceAfterMinor ?? null;
-      const netChargedMinor = balanceBeforeMinor != null && finalBalanceMinor != null ? balanceBeforeMinor - finalBalanceMinor : null;
+      const paymentAuthorized = nextPayment?.status === 'authorized';
+      const compensationCompleted = nextCompensation?.status === 'compensated';
+      // A reconciliation decline has no task-owned balance effect. Do not use
+      // the current global wallet balance here: another purchase may have won
+      // the race while this task was awaiting a definitive capture result.
+      const finalBalanceMinor = paymentAuthorized
+        ? nextPayment.walletBalanceMinor ?? walletBalanceMinor
+        : compensationCompleted
+          ? nextCompensation.finalBalanceMinor ?? walletBalanceMinor
+          : current.finalBalanceMinor ?? task.wallet?.finalBalanceMinor ?? task.wallet?.balanceAfterMinor ?? null;
+      const netChargedMinor = compensationCompleted
+        ? 0
+        : paymentAuthorized
+          ? nextPayment.amountMinor ?? current.amountMinor ?? null
+          : current.netChargedMinor;
       const financialOutcome = outcome || current.outcome || 'not_started';
       task.financial = {
         ...current,
@@ -3083,21 +3123,41 @@ class NaviPaySandboxService {
     const reconciledCapture = this.issuerAdapter.reconcile
       ? this.issuerAdapter.reconcile({ operationId: `op_${taskId}_card_capture`, taskId, cardId: task.card?.cardId, walletId: task.walletId, merchantId: task.quote.merchantId, amountMinor: task.quote.totalMinor, currency: task.currency, resolution })
       : null;
-    const payment = reconciledCapture?.payment || this.walletAdapter.resolveUnknown({ operationId: operationId(taskId, 'payment'), taskId, walletId: task.walletId, merchantId: task.quote.merchantId, amountMinor: task.quote.totalMinor, currency: task.currency, resolution });
+    const adapterPayment = reconciledCapture?.payment || this.walletAdapter.resolveUnknown({ operationId: operationId(taskId, 'payment'), taskId, walletId: task.walletId, merchantId: task.quote.merchantId, amountMinor: task.quote.totalMinor, currency: task.currency, resolution });
+    const normalized = normalizeReconciliationResult(reconciledCapture, adapterPayment);
+    const { status, payment } = normalized;
     this._updateTask(taskId, (current) => {
-      current.payment = { ...payment, authorizationReference: current.payment?.authorizationReference || null, captureReference: reconciledCapture?.captureReference || current.payment?.captureReference || null };
-      current.card = current.card ? { ...current.card, status: resolution === 'authorized' ? 'captured' : 'retired', captureCount: resolution === 'authorized' ? 1 : current.card.captureCount, retiredAt: resolution === 'declined' ? now(this.clock) : current.card.retiredAt } : current.card;
+      current.payment = { ...payment, authorizationReference: payment.authorizationReference || current.payment?.authorizationReference || null, captureReference: payment.captureReference || current.payment?.captureReference || null, paymentMode: current.payment?.paymentMode || task.paymentMode || 'issuer_authorization' };
+      if (current.checkout) {
+        current.checkout = {
+          ...current.checkout,
+          status,
+          code: payment.code || current.checkout.code || null,
+          captureReference: payment.captureReference || current.checkout.captureReference || null,
+          capturedAt: status === 'authorized' ? (reconciledCapture?.capturedAt || current.checkout.capturedAt || now(this.clock)) : null,
+          reason: status === 'declined' ? (payment.message || current.checkout.reason || 'The issuer capture was declined.') : null
+        };
+      }
+      current.card = current.card ? {
+        ...current.card,
+        status: status === 'authorized' ? 'captured' : 'retired',
+        captureCount: status === 'authorized' ? Math.max(current.card.captureCount || 0, 1) : current.card.captureCount,
+        retiredAt: status === 'declined' ? (current.card.retiredAt || now(this.clock)) : current.card.retiredAt
+      } : current.card;
       current.instrument = current.card;
-      current.wallet = { ...current.wallet, balanceAfterMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null };
     });
-    this._updateFinancial(taskId, { payment, outcome: resolution === 'authorized' ? 'authorized' : 'declined' });
-    this._recordStageAudit(taskId, 'payment', `payment.reconciled.${resolution}`, resolution === 'authorized' ? 'success' : 'warning', resolution === 'authorized' ? 'Unknown payment reconciled as authorized without retrying the transfer.' : 'Unknown payment reconciled as declined; inventory will be released.', payment);
-    if (resolution === 'declined') {
+    this._updateFinancial(taskId, { payment, outcome: status });
+    this._recordStageAudit(taskId, 'payment', `payment.reconciled.${status}`, status === 'authorized' ? 'success' : 'warning', status === 'authorized' ? 'Unknown payment reconciled as authorized without retrying the transfer.' : 'Unknown payment reconciled as declined; inventory will be released.', { ...payment, requestedResolution: resolution, definitiveStatus: status });
+    if (status === 'declined') {
       if (this.issuerAdapter.retire && task.card?.cardId) this.issuerAdapter.retire({ operationId: `op_${taskId}_card_retired`, taskId, cardId: task.card.cardId, reason: 'reconciled_declined' });
       this._updateTask(taskId, (current) => { if (current.card) { current.card.status = 'retired'; current.card.retiredAt = current.card.retiredAt || now(this.clock); } current.instrument = current.card; });
       this._releaseReservation(taskId, 'payment reconciled declined');
-      this._updateFinancial(taskId, { outcome: 'declined' });
-      this._fail(taskId, 'payment', 'PAYMENT_DECLINED_RECONCILED', 'The unknown wallet transfer was reconciled as declined; no duplicate payment was attempted.', { reference: payment.reference });
+      const failureCode = payment.code || 'PAYMENT_DECLINED_RECONCILED';
+      const failureMessage = failureCode === 'INSUFFICIENT_FUNDS'
+        ? 'The unknown wallet transfer was reconciled as insufficient funds; no duplicate payment was attempted.'
+        : 'The unknown wallet transfer was reconciled as declined; no duplicate payment was attempted.';
+      this._fail(taskId, 'payment', failureCode, failureMessage, { reference: payment.reference });
+      this._updateFinancial(taskId, { payment, outcome: 'declined' });
       const response = this._response(taskId, 200);
       this.store.transaction((data) => { data.idempotency[key] = { taskId, requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(response) }; });
       return response;
@@ -3105,10 +3165,10 @@ class NaviPaySandboxService {
     this._complete(taskId, 'payment', payment, payment.captureReference || payment.reference);
     if (this.issuerAdapter.retire && task.card?.cardId) {
       const retired = this.issuerAdapter.retire({ operationId: `op_${taskId}_card_retired`, taskId, cardId: task.card.cardId, reason: 'reconciled_capture' });
-      this._updateTask(taskId, (current) => { if (current.card) { current.card.status = 'retired'; current.card.captureCount = 1; current.card.retiredAt = retired.retiredAt; } current.instrument = current.card; });
+      this._updateTask(taskId, (current) => { if (current.card) { current.card.status = 'retired'; current.card.captureCount = Math.max(current.card.captureCount || 0, 1); current.card.retiredAt = retired.retiredAt; } current.instrument = current.card; });
       this._transition(taskId, 'card_retired', 'card_retired', 'Disposable card retired after reconciliation.', { operationId: `op_${taskId}_card_retired`, reference: retired.reference, status: 'success' });
     }
-    this._updateFinancial(taskId, { outcome: 'authorized' });
+    this._updateFinancial(taskId, { payment, outcome: 'authorized' });
     this._updateTask(taskId, (current) => { current.state = 'payment_confirmed'; current.automation = { ...current.automation, status: 'running', nextAction: 'Continuing after reconciled payment.' }; });
     const result = this.runTask(taskId);
     this.store.transaction((data) => { data.idempotency[key] = { taskId, requestFingerprint: fingerprint, createdAt: now(this.clock), response: clone(result) }; });
