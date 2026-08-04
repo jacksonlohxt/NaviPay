@@ -222,7 +222,31 @@ const APPROVED_MERCHANT_IDS = new Set(APPROVED_MERCHANT_SCOPE.map((entry) => ent
 const APPROVED_PRODUCT_CATEGORIES = new Set(['keyboards', 'mice', 'earphones']);
 const DEFAULT_PURCHASE_PURPOSE = 'one_purchase';
 
-const STOP_WORDS = new Set(['a', 'an', 'and', 'below', 'budget', 'buy', 'for', 'find', 'get', 'i', 'like', 'limit', 'max', 'maximum', 'me', 'more', 'my', 'no', 'of', 'please', 'quantity', 'qty', 'sgd', 'some', 'spend', 'spending', 'than', 'the', 'to', 'under', 'unit', 'units', 'up', 'want', 'within', 'would', 'xsgd']);
+const CARDINAL_QUANTITIES = Object.freeze({
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20
+});
+const QUANTITY_WORDS = new Set(Object.keys(CARDINAL_QUANTITIES));
+const STOP_WORDS = new Set(['a', 'an', 'and', 'below', 'budget', 'buy', 'for', 'find', 'get', 'i', 'like', 'limit', 'max', 'maximum', 'me', 'more', 'my', 'no', 'of', 'please', 'quantity', 'qty', 'sgd', 'some', 'spend', 'spending', 'than', 'the', 'to', 'under', 'unit', 'units', 'up', 'want', 'within', 'would', 'xsgd', ...QUANTITY_WORDS]);
 const CATEGORY_ALIASES = [
   ['keyboards', ['keyboard', 'keyboards']],
   ['mice', ['mouse', 'mice']],
@@ -265,6 +289,19 @@ function parseBudget(raw) {
   return { amountMinor, currency: CURRENCY, raw: match[0].trim() };
 }
 
+function quantityTokenValue(token) {
+  if (token === undefined || token === null) return null;
+  const normalized = String(token).toLocaleLowerCase('en-SG');
+  if (Object.prototype.hasOwnProperty.call(CARDINAL_QUANTITIES, normalized)) return CARDINAL_QUANTITIES[normalized];
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(normalized)) return null;
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : null;
+}
+
+function isQuantityToken(token) {
+  return quantityTokenValue(token) !== null || QUANTITY_WORDS.has(String(token).toLocaleLowerCase('en-SG'));
+}
+
 function parseRequest(value) {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > 240 || /[\u0000-\u001f\u007f]/.test(value)) {
     throw new AdapterError('INVALID_PURCHASE_REQUEST', 'Purchase request must be plain text between 1 and 240 characters.');
@@ -280,14 +317,23 @@ function parseRequest(value) {
   const categoryWordIndex = category ? words.findIndex((word) => CATEGORY_ALIASES.find(([canonical]) => canonical === category)?.[1].includes(word)) : -1;
   const trailingBrandWord = !knownBrand ? /\b(?:from|by|brand)\s+([a-z][a-z0-9-]*)\b/i.exec(raw)?.[1] || null : null;
   const inferredBrandWord = !knownBrand && categoryWordIndex > 0
-    ? words.slice(0, categoryWordIndex).filter((word) => !STOP_WORDS.has(word) && !/^\d+$/.test(word)).at(-1)
+    ? words.slice(0, categoryWordIndex).filter((word) => !STOP_WORDS.has(word) && !isQuantityToken(word)).at(-1)
     : null;
   const requestedBrandWord = knownBrand || inferredBrandWord || trailingBrandWord;
   const brand = requestedBrandWord ? (knownBrand || `${requestedBrandWord.charAt(0).toUpperCase()}${requestedBrandWord.slice(1)}`) : null;
-  const quantityMatch = /\b(?:quantity|qty)\s*(?:of\s*)?(\d{1,3})\b/i.exec(raw) || /\b(\d{1,3})\s+(?:units?|items?)\b/i.exec(raw);
-  const quantity = quantityMatch ? Number(quantityMatch[1]) : 1;
-  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 10) throw new AdapterError('INVALID_QUANTITY', 'Quantity must be a whole number from 1 to 10.');
-  const keywords = [...new Set(words.filter((word) => !STOP_WORDS.has(word) && !/^\d+$/.test(word)))];
+  const quantityValuePattern = '(?:[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)';
+  const quantityBoundary = '(?<![A-Za-z0-9])';
+  const quantityEndBoundary = '(?![A-Za-z0-9])';
+  const namedQuantity = new RegExp(`${quantityBoundary}(?:quantity|qty)\\s*(?:of\\s*)?(?:[:=]\\s*)?(${quantityValuePattern})${quantityEndBoundary}`, 'i').exec(raw);
+  const unitQuantity = new RegExp(`${quantityBoundary}(${quantityValuePattern})\\s+(?:units?|items?)${quantityEndBoundary}`, 'i').exec(raw);
+  const bareQuantity = new RegExp(`${quantityBoundary}(?:buy|get|find|want|purchase|order)\\s+(?:(?:a|an)\\s+)?(${quantityValuePattern})${quantityEndBoundary}`, 'i').exec(raw);
+  const explicitQuantityMarker = /\b(?:quantity|qty)\b/i.test(raw);
+  const quantityMatch = namedQuantity || unitQuantity || bareQuantity;
+  const quantityToken = quantityMatch ? quantityMatch[1] : null;
+  if (explicitQuantityMarker && !quantityMatch) throw new AdapterError('INVALID_QUANTITY', 'Quantity must be a numeric or cardinal value.');
+  const quantity = quantityToken === null ? 1 : quantityTokenValue(quantityToken);
+  if (!Number.isFinite(quantity)) throw new AdapterError('INVALID_QUANTITY', 'Quantity must be a numeric or cardinal value.');
+  const keywords = [...new Set(words.filter((word) => !STOP_WORDS.has(word) && !isQuantityToken(word)))];
   if (!keywords.length) throw new AdapterError('INVALID_PURCHASE_REQUEST', 'Purchase request must include an item keyword.');
   const product = typeof CATALOG !== 'undefined'
     ? CATALOG.find((entry) => normalizeWords(entry.item).every((word) => words.includes(word)))?.item || null
@@ -1200,6 +1246,13 @@ function safeAuthorizationDecision(decision) {
     reason: decision.reason,
     purpose: decision.purpose || DEFAULT_PURCHASE_PURPOSE,
     decidedAt: decision.decidedAt || null,
+    quantityDecision: decision.quantityDecision ? {
+      requested: decision.quantityDecision.requested,
+      authorized: decision.quantityDecision.authorized,
+      status: decision.quantityDecision.status,
+      code: decision.quantityDecision.code || null,
+      reason: decision.quantityDecision.reason
+    } : null,
     checks: decision.checks ? clone(decision.checks) : {},
     candidate: decision.candidate ? {
       id: safeReference(decision.candidate.id),
@@ -2192,6 +2245,8 @@ class NaviPaySandboxService {
 
   _recordAuthorizationDecision(taskId, { status, code = null, reason, checks = {}, candidate = null } = {}) {
     const task = this.getTask(taskId);
+    const requestedQuantity = task.request?.intent?.quantity ?? 1;
+    const quantityAllowed = requestedQuantity === 1;
     const decision = {
       version: 1,
       decisionId: stableReference('AUTHZ', `${task.id}:${status}:${code || 'approved'}:${task.quote?.snapshotHash || 'unlocked'}`),
@@ -2200,6 +2255,13 @@ class NaviPaySandboxService {
       reason,
       purpose: task.authorizationEnvelope?.purpose || DEFAULT_PURCHASE_PURPOSE,
       decidedAt: now(this.clock),
+      quantityDecision: {
+        requested: requestedQuantity,
+        authorized: 1,
+        status: quantityAllowed ? 'passed' : 'failed',
+        code: quantityAllowed ? null : 'QUANTITY_UNSUPPORTED',
+        reason: quantityAllowed ? 'Exactly one unit was requested and is authorized.' : 'This authorization permits exactly one unit; the requested quantity was not authorized.'
+      },
       checks,
       candidate: candidate ? clone(candidate) : null
     };
