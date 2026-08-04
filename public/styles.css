@@ -153,6 +153,11 @@ button:disabled { cursor: wait; opacity: .62; }
 .receipt-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding: .8rem; border-radius: 13px; background: var(--lime); }
 .receipt-heading strong, .receipt-heading small { display: block; }
 .receipt-heading small { margin-top: .15rem; color: #46653d; font-size: .68rem; }
+.receipt-capture-note, .receipt-adjustment-note { margin: .65rem 0 0; color: var(--muted); font-size: .68rem; }
+.receipt-adjustment { margin-top: .75rem; padding: .75rem; border: 1px solid #e4c28a; border-radius: 13px; background: #fff9e9; }
+.receipt-adjustment .panel-heading { margin-bottom: .35rem; }
+.receipt-adjustment h3 { margin: .2rem 0 0; font-size: .9rem; }
+.receipt-adjustment .detail-list { margin-top: .55rem; }
 .receipt-balances, .receipt-statuses { margin-top: .55rem; }
 .receipt-statuses { grid-template-columns: repeat(4, 1fr); }
 .receipt-references { margin-top: .65rem; }

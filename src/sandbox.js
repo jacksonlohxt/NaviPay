@@ -912,7 +912,9 @@ class LocalMerchantCheckoutAdapter extends LocalMerchantCreditAdapter {
   refund({ taskId, cardId, walletId, merchantId, amountMinor, currency, kind = 'refund' }) {
     const result = this.issuer.refund({ operationId: `op_${taskId}_card_${kind}`, taskId, cardId, walletId, merchantId, amountMinor, currency, kind });
     this.store.transaction((data) => {
-      data.checkoutWebhooks.push({ id: stableReference('WEBHOOK', result.operationId), sessionId: stableReference('CHECKOUT', taskId), type: kind === 'reversal' ? 'payment.reversed' : 'payment.refunded', status: 'received', occurredAt: result.occurredAt, reference: result.reference });
+      const webhookId = stableReference('WEBHOOK', result.operationId);
+      if (data.checkoutWebhooks.some((event) => event.id === webhookId)) return;
+      data.checkoutWebhooks.push({ id: webhookId, sessionId: stableReference('CHECKOUT', taskId), type: kind === 'reversal' ? 'payment.reversed' : 'payment.refunded', status: 'received', occurredAt: result.occurredAt, reference: result.reference });
     });
     return result;
   }
@@ -1337,7 +1339,120 @@ function projectAuditEvent(event) {
     status: event.status,
     summary: event.summary,
     operationId: safeReference(event.operationId),
-    reference: safeReference(event.reference)
+    reference: safeReference(event.reference),
+    transactionReference: safeReference(event.details?.transactionReference)
+  };
+}
+
+function projectPaymentAdjustment(adjustment) {
+  if (!adjustment) return null;
+  return {
+    kind: adjustment.kind,
+    status: adjustment.status,
+    currentPaymentStatus: adjustment.currentPaymentStatus || null,
+    originalCaptureStatus: adjustment.originalCaptureStatus || null,
+    amountMinor: adjustment.amountMinor ?? null,
+    currency: adjustment.currency || CURRENCY,
+    netChargedMinor: adjustment.netChargedMinor ?? null,
+    netRefundedMinor: adjustment.netRefundedMinor ?? 0,
+    failureCode: adjustment.failureCode || null,
+    reference: safeReference(adjustment.reference),
+    transactionReference: safeReference(adjustment.transactionReference),
+    requestedAt: adjustment.requestedAt || null,
+    occurredAt: adjustment.occurredAt || null,
+    compensation: adjustment.compensation ? {
+      status: adjustment.compensation.status,
+      amountMinor: adjustment.compensation.amountMinor ?? 0,
+      reference: safeReference(adjustment.compensation.reference),
+      transactionReference: safeReference(adjustment.compensation.transactionReference),
+      occurredAt: adjustment.compensation.occurredAt || null
+    } : null
+  };
+}
+
+function projectCaptureSnapshot(snapshot) {
+  if (!snapshot) return null;
+  return {
+    status: snapshot.status,
+    paymentStatus: snapshot.paymentStatus || null,
+    amountMinor: snapshot.amountMinor ?? null,
+    currency: snapshot.currency || CURRENCY,
+    balanceBeforeMinor: snapshot.balanceBeforeMinor ?? null,
+    balanceAfterPaymentMinor: snapshot.balanceAfterPaymentMinor ?? null,
+    finalBalanceMinor: snapshot.finalBalanceMinor ?? null,
+    netChargedMinor: snapshot.netChargedMinor ?? null,
+    paymentReference: safeReference(snapshot.paymentReference),
+    transactionReference: safeReference(snapshot.transactionReference),
+    authorizationReference: safeReference(snapshot.authorizationReference),
+    captureReference: safeReference(snapshot.captureReference),
+    capturedAt: snapshot.capturedAt || null
+  };
+}
+
+function captureSnapshotFromReceipt(receipt) {
+  return receipt.captureSnapshot || {
+    status: 'captured',
+    paymentStatus: receipt.paymentStatus || null,
+    amountMinor: receipt.amountMinor ?? receipt.totalMinor ?? null,
+    currency: receipt.currency || CURRENCY,
+    balanceBeforeMinor: receipt.balanceBeforeMinor ?? null,
+    balanceAfterPaymentMinor: receipt.balanceAfterPaymentMinor ?? null,
+    finalBalanceMinor: receipt.finalBalanceMinor ?? null,
+    netChargedMinor: receipt.netChargedMinor ?? null,
+    paymentReference: receipt.paymentReference || null,
+    transactionReference: null,
+    authorizationReference: receipt.authorizationReference || null,
+    captureReference: receipt.captureReference || null,
+    capturedAt: receipt.issuedAt || null
+  };
+}
+
+function projectReceipt(receipt) {
+  if (!receipt) return null;
+  return {
+    status: receipt.status,
+    id: safeReference(receipt.id),
+    mode: receipt.mode,
+    walletName: receipt.walletName || null,
+    customer: receipt.customer ? {
+      name: receipt.customer.name,
+      addressLabel: receipt.customer.address?.label || receipt.customer.addressLabel || null,
+      disclosure: receipt.customer.disclosure
+    } : null,
+    merchant: receipt.merchant,
+    merchantId: safeReference(receipt.merchantId),
+    item: receipt.item,
+    variant: receipt.variant,
+    subtotalMinor: receipt.subtotalMinor,
+    shippingMinor: receipt.shippingMinor,
+    taxMinor: receipt.taxMinor,
+    amountMinor: receipt.amountMinor,
+    totalMinor: receipt.totalMinor ?? receipt.amountMinor,
+    currency: receipt.currency,
+    balanceBeforeMinor: receipt.balanceBeforeMinor ?? null,
+    balanceAfterPaymentMinor: receipt.balanceAfterPaymentMinor ?? null,
+    finalBalanceMinor: receipt.finalBalanceMinor ?? null,
+    netChargedMinor: receipt.netChargedMinor ?? null,
+    paymentStatus: receipt.paymentStatus || null,
+    paymentReference: safeReference(receipt.paymentReference),
+    authorizationReference: safeReference(receipt.authorizationReference),
+    captureReference: safeReference(receipt.captureReference),
+    merchantCreditReference: safeReference(receipt.merchantCreditReference),
+    orderReference: safeReference(receipt.orderReference),
+    orderStatus: receipt.orderStatus || null,
+    inventoryReservationReference: safeReference(receipt.inventoryReservationReference),
+    fulfillmentStatus: receipt.fulfillmentStatus || null,
+    fulfillmentReference: safeReference(receipt.fulfillmentReference),
+    deliveryStatus: receipt.deliveryStatus || null,
+    deliveryReference: safeReference(receipt.deliveryReference),
+    trackingReference: safeReference(receipt.trackingReference),
+    quoteId: safeReference(receipt.quoteId),
+    cartId: safeReference(receipt.cartId),
+    snapshotHash: safeReference(receipt.snapshotHash),
+    captureSnapshot: projectCaptureSnapshot(captureSnapshotFromReceipt(receipt)),
+    adjustment: projectPaymentAdjustment(receipt.adjustment),
+    issuedAt: receipt.issuedAt || null,
+    disclosure: receipt.disclosure
   };
 }
 
@@ -1346,6 +1461,7 @@ function projectFinancial(task, walletBalanceMinor = null) {
   const payment = task.payment || {};
   const compensation = task.compensation || financial.compensation || null;
   const finalBalanceMinor = financial.finalBalanceMinor ?? null;
+  const netRefundedMinor = financial.netRefundedMinor ?? (compensation?.status === 'compensated' ? compensation.amountMinor || 0 : 0);
   return {
     version: 1,
     currency: task.currency,
@@ -1354,9 +1470,10 @@ function projectFinancial(task, walletBalanceMinor = null) {
     balanceAfterPaymentMinor: financial.balanceAfterPaymentMinor ?? payment.balanceAfterPaymentMinor ?? null,
     finalBalanceMinor,
     netChargedMinor: financial.netChargedMinor ?? (financial.balanceBeforeMinor != null && finalBalanceMinor != null ? financial.balanceBeforeMinor - finalBalanceMinor : null),
+    netRefundedMinor,
     compensation: compensation ? {
       status: compensation.status,
-      amountMinor: compensation.amountMinor || 0,
+      amountMinor: compensation.amountMinor ?? 0,
       reference: safeReference(compensation.reference),
       transactionReference: safeReference(compensation.transactionReference),
       occurredAt: compensation.occurredAt || null
@@ -1433,9 +1550,15 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
     paymentMode: task.payment.paymentMode || task.paymentMode || 'issuer_authorization',
     occurredAt: task.payment.occurredAt || null,
     resolvedAt: task.payment.resolvedAt || null,
+    adjustmentStatus: task.payment.adjustmentStatus || null,
+    adjustmentReference: safeReference(task.payment.adjustmentReference),
+    adjustmentTransactionReference: safeReference(task.payment.adjustmentTransactionReference),
+    adjustedAt: task.payment.adjustedAt || null,
+    refundReference: safeReference(task.payment.refundReference),
+    reversalReference: safeReference(task.payment.reversalReference),
     balanceBeforeMinor: task.payment.balanceBeforeMinor ?? null,
     balanceAfterPaymentMinor: task.payment.balanceAfterPaymentMinor ?? null
-  } : { status: 'not_started', code: null, amountMinor: quote?.totalMinor || null, currency: task.currency, reference: null, transactionReference: null, occurredAt: null, resolvedAt: null, balanceBeforeMinor: null, balanceAfterPaymentMinor: null };
+  } : { status: 'not_started', code: null, amountMinor: quote?.totalMinor || null, currency: task.currency, reference: null, transactionReference: null, occurredAt: null, resolvedAt: null, adjustmentStatus: null, adjustmentReference: null, adjustmentTransactionReference: null, adjustedAt: null, refundReference: null, reversalReference: null, balanceBeforeMinor: null, balanceAfterPaymentMinor: null };
   return {
     version: TASK_PROJECTION_VERSION,
     taskId: task.id,
@@ -1488,7 +1611,9 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
       currency: task.wallet.currency,
       balanceBeforeMinor: task.financial?.balanceBeforeMinor ?? task.wallet.balanceMinor ?? null,
       balanceAfterPaymentMinor: task.financial?.balanceAfterPaymentMinor ?? null,
-      finalBalanceMinor: task.financial?.finalBalanceMinor ?? task.wallet.balanceAfterMinor ?? null
+      finalBalanceMinor: task.financial?.finalBalanceMinor ?? task.wallet.balanceAfterMinor ?? null,
+      netChargedMinor: task.financial?.netChargedMinor ?? task.wallet.netChargedMinor ?? null,
+      netRefundedMinor: task.financial?.netRefundedMinor ?? task.wallet.netRefundedMinor ?? 0
     } : null,
     financial: projectFinancial(task, walletBalanceMinor),
     card: task.card ? {
@@ -1536,41 +1661,7 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
       observedAt: task.funding.observedAt || null
     } : { status: 'not_started' },
     customer: task.customer ? { name: task.customer.name, addressLabel: task.customer.address?.label || null, disclosure: task.customer.disclosure } : null,
-    receipt: task.receipt ? {
-      status: task.receipt.status,
-      id: safeReference(task.receipt.id),
-      item: task.receipt.item,
-      merchant: task.receipt.merchant,
-      variant: task.receipt.variant,
-      subtotalMinor: task.receipt.subtotalMinor,
-      shippingMinor: task.receipt.shippingMinor,
-      taxMinor: task.receipt.taxMinor,
-      amountMinor: task.receipt.amountMinor,
-      totalMinor: task.receipt.totalMinor ?? task.receipt.amountMinor,
-      currency: task.receipt.currency,
-      balanceBeforeMinor: task.receipt.balanceBeforeMinor ?? null,
-      balanceAfterPaymentMinor: task.receipt.balanceAfterPaymentMinor ?? null,
-      finalBalanceMinor: task.receipt.finalBalanceMinor ?? null,
-      netChargedMinor: task.receipt.netChargedMinor ?? null,
-      paymentStatus: task.receipt.paymentStatus || null,
-      paymentReference: safeReference(task.receipt.paymentReference),
-      authorizationReference: safeReference(task.receipt.authorizationReference),
-      captureReference: safeReference(task.receipt.captureReference),
-      merchantCreditReference: safeReference(task.receipt.merchantCreditReference),
-      orderReference: safeReference(task.receipt.orderReference),
-      orderStatus: task.receipt.orderStatus || null,
-      inventoryReservationReference: safeReference(task.receipt.inventoryReservationReference),
-      fulfillmentStatus: task.receipt.fulfillmentStatus,
-      fulfillmentReference: safeReference(task.receipt.fulfillmentReference),
-      deliveryStatus: task.receipt.deliveryStatus,
-      deliveryReference: safeReference(task.receipt.deliveryReference),
-      trackingReference: safeReference(task.receipt.trackingReference),
-      quoteId: safeReference(task.receipt.quoteId),
-      cartId: safeReference(task.receipt.cartId),
-      snapshotHash: safeReference(task.receipt.snapshotHash),
-      issuedAt: task.receipt.issuedAt,
-      disclosure: task.receipt.disclosure
-    } : null,
+    receipt: projectReceipt(task.receipt),
     progress: (task.progress || []).map((item) => ({ stage: item.stage, status: item.status === 'pending' && !item.startedAt ? 'not_started' : item.status, reference: safeReference(item.reference), detail: item.detail, startedAt: item.startedAt, completedAt: item.completedAt })),
     failure: task.failure ? { stage: task.failure.stage, code: task.failure.code, message: task.failure.message } : null,
     operations: Object.values(operations).filter((operation) => operation.taskId === task.id).map(projectOperation),
@@ -1815,6 +1906,7 @@ class NaviPaySandboxService {
         balanceAfterPaymentMinor: null,
         finalBalanceMinor: null,
         netChargedMinor: null,
+        netRefundedMinor: 0,
         compensation: { status: 'not_required', amountMinor: 0, reference: null, transactionReference: null, occurredAt: null },
         outcome: 'not_started'
       },
@@ -1865,14 +1957,7 @@ class NaviPaySandboxService {
   getReceipt(taskId) {
     const task = this.getTask(taskId);
     if (!task.receipt) throw new SandboxDomainError(404, 'RECEIPT_NOT_READY', 'The purchase has no confirmed receipt yet.');
-    return {
-      ...task.receipt,
-      customer: task.receipt.customer ? {
-        name: task.receipt.customer.name,
-        addressLabel: task.receipt.customer.address?.label || null,
-        disclosure: task.receipt.customer.disclosure
-      } : null
-    };
+    return projectReceipt(task.receipt);
   }
 
   getDiscoveryProjection() {
@@ -2318,7 +2403,7 @@ class NaviPaySandboxService {
 
   _recordStageAudit(taskId, stageName, type, status, summary, result) {
     this.store.transaction((data) => {
-      this._audit(data, taskId, type, status, summary, { operationId: operationId(taskId, stageName), reference: result?.reference || result?.transactionReference || null, status: result?.status || null });
+      this._audit(data, taskId, type, status, summary, { operationId: operationId(taskId, stageName), reference: result?.reference || result?.transactionReference || null, transactionReference: result?.transactionReference || null, status: result?.status || null });
     });
   }
 
@@ -2424,7 +2509,7 @@ class NaviPaySandboxService {
       const task = data.tasks[taskId];
       if (!task) return;
       const walletBalanceMinor = data.wallets[task.walletId]?.balanceMinor ?? null;
-      const current = task.financial || { version: 1, amountMinor: task.quote?.totalMinor ?? null, balanceBeforeMinor: null, balanceAfterPaymentMinor: null, finalBalanceMinor: null, netChargedMinor: null, compensation: null, outcome: 'pending' };
+      const current = task.financial || { version: 1, amountMinor: task.quote?.totalMinor ?? null, balanceBeforeMinor: null, balanceAfterPaymentMinor: null, finalBalanceMinor: null, netChargedMinor: null, netRefundedMinor: 0, compensation: null, outcome: 'pending' };
       const nextPayment = payment || task.payment;
       const balanceBeforeMinor = current.balanceBeforeMinor ?? nextPayment?.balanceBeforeMinor ?? (nextPayment ? walletBalanceMinor : null);
       const afterPayment = current.balanceAfterPaymentMinor ?? nextPayment?.balanceAfterPaymentMinor ?? (nextPayment?.status === 'authorized' ? nextPayment.walletBalanceMinor : null);
@@ -2453,6 +2538,7 @@ class NaviPaySandboxService {
         balanceAfterPaymentMinor: afterPayment,
         finalBalanceMinor,
         netChargedMinor,
+        netRefundedMinor: compensation ? (nextCompensation?.status === 'compensated' ? nextCompensation.amountMinor || 0 : 0) : current.netRefundedMinor ?? (nextCompensation?.status === 'compensated' ? nextCompensation.amountMinor || 0 : 0),
         compensation: nextCompensation,
         outcome: financialOutcome
       };
@@ -2525,6 +2611,22 @@ class NaviPaySandboxService {
       paymentReference: task.payment.reference,
       authorizationReference: task.payment.authorizationReference || task.checkout?.authorizationReference || null,
       captureReference: task.payment.captureReference || task.checkout?.captureReference || null,
+      captureSnapshot: {
+        status: 'captured',
+        paymentStatus: task.payment.status,
+        amountMinor: task.payment.amountMinor,
+        currency: task.currency,
+        balanceBeforeMinor: task.financial.balanceBeforeMinor,
+        balanceAfterPaymentMinor: task.financial.balanceAfterPaymentMinor,
+        finalBalanceMinor: task.financial.finalBalanceMinor,
+        netChargedMinor: task.financial.netChargedMinor,
+        paymentReference: task.payment.reference,
+        transactionReference: task.payment.transactionReference || null,
+        authorizationReference: task.payment.authorizationReference || task.checkout?.authorizationReference || null,
+        captureReference: task.payment.captureReference || task.checkout?.captureReference || null,
+        capturedAt: task.checkout?.capturedAt || task.payment.occurredAt || null
+      },
+      adjustment: null,
       merchantCreditReference: task.merchantCredit.reference,
       orderReference: task.order.reference,
       orderStatus: task.order.status,
@@ -3205,20 +3307,85 @@ class NaviPaySandboxService {
     const previous = this._readIdempotency(key, kind);
     if (previous?.response) return { ...clone(previous.response), replayed: true };
     const task = this.getTask(taskId);
+    const existingAdjustment = task.receipt?.adjustment;
+    if (existingAdjustment) {
+      if (existingAdjustment.kind !== kind) throw new SandboxDomainError(409, 'PAYMENT_ALREADY_ADJUSTED', `This capture already has a ${existingAdjustment.kind}; a second payment adjustment was not attempted.`);
+      const response = this._response(taskId);
+      this.store.transaction((data) => { data.idempotency[key] = { taskId, requestFingerprint: kind, createdAt: now(this.clock), response: clone(response) }; });
+      return { ...response, replayed: true };
+    }
     if (!['completed'].includes(task.state) || task.payment?.status !== 'authorized') throw new SandboxDomainError(409, 'PAYMENT_NOT_REFUNDABLE', 'Only a confirmed issuer capture can be refunded or reversed.');
+    const requestedAt = now(this.clock);
     let result;
     try {
       result = this.merchantCheckoutAdapter.refund({ taskId, cardId: task.card?.cardId, walletId: task.walletId, merchantId: task.quote.merchantId, amountMinor: task.quote.totalMinor, currency: task.currency, kind });
     } catch (error) {
       throw new SandboxDomainError(502, error.code || 'PAYMENT_REVERSAL_FAILED', error.message || 'The local payment reversal failed.');
     }
+    const succeeded = ['refunded', 'reversed'].includes(result.status);
+    const refundedAmountMinor = succeeded ? result.amountMinor : 0;
+    const compensation = {
+      ...result,
+      amountMinor: refundedAmountMinor,
+      status: succeeded ? 'compensated' : 'failed'
+    };
+    const adjustment = {
+      kind,
+      status: result.status,
+      currentPaymentStatus: succeeded ? result.status : task.payment.status,
+      originalCaptureStatus: task.receipt?.paymentStatus || task.payment.status,
+      amountMinor: result.amountMinor,
+      currency: result.currency || task.currency,
+      netChargedMinor: task.quote.totalMinor - refundedAmountMinor,
+      netRefundedMinor: refundedAmountMinor,
+      failureCode: result.status === 'failed' ? 'COMPENSATION_FAILED' : null,
+      reference: result.reference,
+      transactionReference: result.transactionReference || null,
+      requestedAt,
+      occurredAt: result.occurredAt,
+      compensation
+    };
     this._updateTask(taskId, (current) => {
-      current.compensation = { ...result, status: result.status };
-      current.payment = { ...current.payment, status: result.status, reversalReference: result.reference, refundReference: result.reference };
-      current.financial = { ...current.financial, compensation: result, outcome: result.status, finalBalanceMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null, netChargedMinor: 0 };
+      current.compensation = compensation;
+      current.payment = {
+        ...current.payment,
+        status: adjustment.currentPaymentStatus,
+        adjustmentStatus: result.status,
+        adjustmentReference: result.reference,
+        adjustmentTransactionReference: result.transactionReference || null,
+        adjustedAt: result.occurredAt,
+        finalBalanceMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null,
+        netChargedMinor: adjustment.netChargedMinor,
+        netRefundedMinor: adjustment.netRefundedMinor,
+        ...(kind === 'reversal' ? { reversalReference: result.reference } : { refundReference: result.reference })
+      };
+      current.financial = {
+        ...current.financial,
+        compensation,
+        outcome: succeeded ? result.status : 'compensation_failed',
+        finalBalanceMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null,
+        netChargedMinor: adjustment.netChargedMinor,
+        netRefundedMinor: adjustment.netRefundedMinor
+      };
+      if (current.receipt) {
+        current.receipt.captureSnapshot = captureSnapshotFromReceipt(current.receipt);
+        current.receipt.adjustment = adjustment;
+      }
+      if (current.wallet) current.wallet = {
+        ...current.wallet,
+        balanceAfterMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null,
+        finalBalanceMinor: this.store.data.wallets[current.walletId]?.balanceMinor ?? null,
+        netChargedMinor: adjustment.netChargedMinor,
+        netRefundedMinor: adjustment.netRefundedMinor
+      };
       current.automation = { ...current.automation, nextAction: 'none' };
     });
-    this._recordStageAudit(taskId, 'payment', kind === 'reversal' ? 'payment.reversed' : 'payment.refunded', 'success', kind === 'reversal' ? 'Issuer capture was reversed in the local gateway.' : 'Issuer capture was refunded in the local gateway.', result);
+    const auditType = succeeded ? (kind === 'reversal' ? 'payment.reversed' : 'payment.refunded') : (kind === 'reversal' ? 'payment.reversal_failed' : 'payment.refund_failed');
+    const auditStatus = succeeded ? 'success' : 'error';
+    const auditSummary = succeeded
+      ? (kind === 'reversal' ? 'Issuer capture was reversed in the local gateway.' : 'Issuer capture was refunded in the local gateway.')
+      : (kind === 'reversal' ? 'Issuer capture reversal failed; the original capture remains settled.' : 'Issuer capture refund failed; the original capture remains settled.');
+    this._recordStageAudit(taskId, 'payment', auditType, auditStatus, auditSummary, { ...result, transactionReference: result.transactionReference || null });
     const response = this._response(taskId);
     this.store.transaction((data) => { data.idempotency[key] = { taskId, requestFingerprint: kind, createdAt: now(this.clock), response: clone(response) }; });
     return response;

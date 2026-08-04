@@ -82,14 +82,93 @@ test('duplicate submission and refund or reversal are persisted exactly once', (
     const sandbox = service();
     const result = run(sandbox, 'duplicate', `duplicate-${kind}`);
     const task = result.body.task;
+    const originalReceipt = JSON.stringify(task.receipt);
     const before = sandbox.getWalletLedger().length;
-    const reversed = sandbox.refundPayment(task.id, `action-${kind}`, kind);
-    assert.equal(reversed.body.task.payment.status, kind === 'refund' ? 'refunded' : 'reversed');
+    const adjusted = sandbox.refundPayment(task.id, `action-${kind}`, kind);
+    assert.equal(adjusted.body.task.payment.status, kind === 'refund' ? 'refunded' : 'reversed');
+    assert.equal(adjusted.body.task.receipt.paymentStatus, 'authorized');
+    assert.equal(adjusted.body.task.receipt.captureSnapshot.paymentStatus, 'authorized');
+    assert.equal(adjusted.body.task.receipt.adjustment.kind, kind);
+    assert.equal(adjusted.body.task.receipt.adjustment.currentPaymentStatus, adjusted.body.task.payment.status);
+    assert.equal(adjusted.body.task.receipt.adjustment.netChargedMinor, 0);
+    assert.equal(adjusted.body.task.receipt.adjustment.netRefundedMinor, task.quote.totalMinor);
+    assert.equal(adjusted.body.task.financial.netChargedMinor, 0);
+    assert.equal(adjusted.body.task.financial.netRefundedMinor, task.quote.totalMinor);
+    assert.equal(adjusted.body.task.order.status, 'confirmed');
+    assert.equal(adjusted.body.task.fulfillment.status, 'fulfilled');
+    assert.equal(adjusted.body.task.delivery.status, 'delivered');
     assert.equal(sandbox.getWalletLedger().length, before + 2);
-    assert.equal(sandbox.getCheckoutWebhooks().at(-1).type, kind === 'refund' ? 'payment.refunded' : 'payment.reversed');
+    assert.equal(sandbox.getCheckoutWebhooks().filter((event) => event.type === (kind === 'refund' ? 'payment.refunded' : 'payment.reversed')).length, 1);
+    assert.equal(sandbox.getAudit(task.id).at(-1).type, kind === 'refund' ? 'payment.refunded' : 'payment.reversed');
+    assert.ok(sandbox.getAudit(task.id).at(-1).transactionReference);
     const replay = sandbox.refundPayment(task.id, `action-${kind}`, kind);
     assert.equal(replay.replayed, true);
+    const repeated = sandbox.refundPayment(task.id, `second-action-${kind}`, kind);
+    assert.equal(repeated.replayed, true);
     assert.equal(sandbox.getWalletLedger().length, before + 2);
+    assert.equal(JSON.stringify({ ...sandbox.getTask(task.id).receipt, adjustment: null }), originalReceipt);
+    assert.throws(() => sandbox.refundPayment(task.id, `wrong-action-${kind}`, kind === 'refund' ? 'reversal' : 'refund'), (error) => error.code === 'PAYMENT_ALREADY_ADJUSTED');
+  }
+});
+
+test('failed compensation stays charged, is safe to reload, and never duplicates ledger legs', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'navipay-refund-failure-'));
+  const filePath = path.join(directory, 'state.json');
+  try {
+    const first = service(new JsonStore(filePath));
+    const result = run(first, 'happy', 'failed-refund');
+    const task = result.body.task;
+    first.store.transaction((data) => { data.merchantBalances[task.quote.merchantId] = 0; });
+    const failed = first.refundPayment(task.id, 'failed-refund-once', 'refund');
+    assert.equal(failed.body.task.payment.status, 'authorized');
+    assert.equal(failed.body.task.payment.adjustmentStatus, 'failed');
+    assert.equal(failed.body.task.receipt.adjustment.status, 'failed');
+    assert.equal(failed.body.task.receipt.adjustment.currentPaymentStatus, 'authorized');
+    assert.equal(failed.body.task.receipt.adjustment.netChargedMinor, task.quote.totalMinor);
+    assert.equal(failed.body.task.receipt.adjustment.netRefundedMinor, 0);
+    assert.equal(failed.body.task.financial.outcome, 'compensation_failed');
+    assert.equal(failed.body.task.financial.finalBalanceMinor, 50000 - task.quote.totalMinor);
+    assert.equal(first.getWalletLedger().length, 2);
+    assert.equal(first.getAudit(task.id).at(-1).type, 'payment.refund_failed');
+
+    const reloaded = service(new JsonStore(filePath));
+    const replay = reloaded.refundPayment(task.id, 'failed-refund-after-reload', 'refund');
+    assert.equal(replay.replayed, true);
+    assert.equal(reloaded.getWalletLedger().length, 2);
+    assert.equal(reloaded.getTaskProjection(task.id).receipt.adjustment.status, 'failed');
+    assert.equal(reloaded.getReceipt(task.id).adjustment.netRefundedMinor, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('receipt, projection, audit, and HTTP read models agree after a reversal', async () => {
+  const sandbox = service();
+  const server = createServer({ service: sandbox });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const purchase = await fetch(`${base}/api/purchases/run`, { method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': 'read-model-purchase' }, body: JSON.stringify({ request: 'Find a mouse' }) }).then((response) => response.json());
+    const reversal = await fetch(`${base}/api/tasks/${purchase.task.id}/payment/reverse`, { method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': 'read-model-reversal' }, body: '{}' }).then((response) => response.json());
+    const receipt = await fetch(`${base}/api/tasks/${purchase.task.id}/receipt`).then((response) => response.json());
+    const projection = await fetch(`${base}/api/tasks/${purchase.task.id}/projection`).then((response) => response.json());
+    const audit = await fetch(`${base}/api/tasks/${purchase.task.id}/audit`).then((response) => response.json());
+    assert.equal(reversal.task.payment.status, 'reversed');
+    assert.deepEqual(receipt.receipt, projection.projection.receipt);
+    assert.equal(receipt.receipt.paymentStatus, 'authorized');
+    assert.equal(receipt.receipt.captureSnapshot.status, 'captured');
+    assert.equal(receipt.receipt.adjustment.currentPaymentStatus, 'reversed');
+    assert.equal(projection.projection.payment.status, 'reversed');
+    assert.equal(projection.projection.financial.netChargedMinor, 0);
+    assert.equal(projection.projection.financial.netRefundedMinor, purchase.task.quote.totalMinor);
+    assert.equal(projection.projection.order.status, 'confirmed');
+    assert.equal(projection.projection.delivery.status, 'delivered');
+    assert.equal(audit.events.at(-1).type, 'payment.reversed');
+    assert.equal(audit.events.at(-1).reference, receipt.receipt.adjustment.reference);
+    assert.equal(audit.events.at(-1).transactionReference, receipt.receipt.adjustment.transactionReference);
+    assert.doesNotMatch(JSON.stringify({ receipt, projection, audit }), /rawProviderPayload|pan|cvv|credentials/i);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

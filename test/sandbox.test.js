@@ -142,6 +142,7 @@ test('order and merchant-credit failures persist truthful compensation snapshots
     assert.equal(task.financial.balanceAfterPaymentMinor, 50000 - task.quote.totalMinor);
     assert.equal(task.financial.finalBalanceMinor, 50000);
     assert.equal(task.financial.netChargedMinor, 0);
+    assert.equal(task.financial.netRefundedMinor, task.quote.totalMinor);
     assert.equal(task.financial.outcome, 'compensated');
     assert.equal(task.wallet.finalBalanceMinor, 50000);
     assert.equal(task.inventory.reservation.status, 'released');
