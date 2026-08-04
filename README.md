@@ -1,6 +1,6 @@
 # NaviPay
 
-NaviPay is a local-only commerce sandbox. A user enters a purchase instruction such as `Find an Apple Magic Keyboard` and presses **Discover and purchase**. The default path is the seeded local merchant catalog and local gateway. Optional approved target-site evidence is explicitly read-only and collapsed in the UI. The server interprets the intent, returns normalized candidates and match evidence, then uses the authoritative local quote, inventory, XSGD wallet, order, fulfillment, delivery, receipt, and audit flow.
+NaviPay is a local-only commerce sandbox. A user enters one purchase instruction such as `Find an Apple Magic Keyboard` and presses **Run purchase**. The default path is the seeded local merchant catalog and local gateway. The frontend keeps the primary path to one instruction, a three-stage tracker (Discovery, Virtual card, Purchase), and a receipt. Optional approved target-site evidence, funding controls, audit evidence, and technical references stay collapsed in secondary views. The server interprets the intent, returns normalized candidates and match evidence, then uses the authoritative local quote, inventory, XSGD wallet, order, fulfillment, delivery, receipt, and audit flow.
 
 Everything in this repository is simulated. No real money, wallet keys, merchant credentials, inventory, customer identity, or delivery network is used.
 
@@ -24,11 +24,11 @@ The public repository contains the application source, tests, and deterministic 
 
 ## Product walkthrough
 
-1. Enter a purchase instruction such as `I want a keyboard` and press **Discover and purchase** once. NaviPay starts with the seeded local catalog and local merchant gateway. Optional browser discovery is available in a clearly labelled collapsed section and never has checkout authority.
+1. Enter a purchase instruction such as `I want a keyboard` and press **Run purchase** once. NaviPay starts with the seeded local catalog and local merchant gateway. Example requests are semantic buttons, and optional browser discovery is available in a clearly labelled collapsed section with no checkout authority.
 2. NaviPay applies bounded budget parsing and hard brand/category constraints, then ranks valid in-stock candidates with a deterministic policy. A clear winner within the XSGD 1,000 task ceiling is selected automatically. An exact out-of-stock brand is never silently replaced by another brand.
-3. NaviPay cross-checks browser identity and quote amounts against the authoritative seeded local catalog, then automatically reserves inventory, verifies the fake wallet, transfers fake funds, confirms merchant credit, creates the order, fulfills it, delivers it, issues the receipt, and records the audit trail. The quiet four-part progress summary shows this work without stage-by-stage controls.
-4. See the receipt first, with the item, merchant, exact price breakdown, task-scoped balances before and after payment, payment state, order, fulfillment, delivery, safe references, issue time, and simulated-only disclosure. Lifecycle stages that were never entered show **Not started** or **Skipped** rather than another task's state.
-5. NaviPay pauses only for a genuine tie or ambiguity, malformed/stale/blocked discovery, no available or over-cap item, insufficient fake funds, an unknown payment result, or another safety exception. **Advanced details** explains the issue and available action. Technical references, ledger legs, operations, chain evidence, and the safe activity timeline stay expandable.
+3. NaviPay cross-checks browser identity and quote amounts against the authoritative seeded local catalog, then automatically reserves inventory, verifies the fake wallet, transfers fake funds, confirms merchant credit, creates the order, fulfills it, delivers it, issues the receipt, and records the audit trail. The calm three-stage tracker shows Discovery, Virtual card, and Purchase without exposing implementation steps.
+4. See the receipt first, with the item, merchant, exact price breakdown, task-scoped balances before and after payment, payment state, order, fulfillment, delivery, safe references, issue time, and explicit simulated-only disclosure. The header Virtual card drawer contains only safe card and task snapshot facts. A task with no financial snapshot shows no invented balance and never falls back to the current global wallet.
+5. NaviPay pauses only for a genuine tie or ambiguity, malformed/stale/blocked discovery, no available or over-cap item, insufficient fake funds, an unknown payment result, or another safety exception. **Advanced details** explains the issue and available action. KYC and funding controls, technical references, ledger legs, operations, chain evidence, and the safe activity timeline stay collapsed until opened. Failure states never render a success-looking receipt.
 
 The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00. Issuer authorization and capture are the only default purchase debit path. The fake issuer is funded by that wallet, and the direct wallet transfer path exists only for explicit legacy test mode.
 
@@ -37,8 +37,8 @@ The customer and address are deliberately labeled simulated and are stored as re
 This is the exact local-only demonstration for the approved issuance and execution milestones. Every card, gateway, merchant response, webhook, order, and delivery result below is simulated. No PAN, CVV, merchant credential, or real payment network is used. Airwallex is reserved for a future Singapore/SGD pilot and StraitsX for future exact-XSGD diligence; neither is a current dependency.
 
 1. Start NaviPay with `npm start`, open <http://127.0.0.1:3000>, and leave the target site blank so the seeded merchant catalog is the authoritative local source.
-2. Enter `Find an Apple Magic Keyboard` and press **Discover and purchase**. NaviPay reserves one unit before payment, verifies the seeded fake wallet, issues a disposable one-use card scoped to Orchard Electronics, XSGD 171.72, and MCC 5732, and starts a fresh bounded checkout worker profile.
-3. Observe **Disposable card issued**, the safe masked reference, checkout submission, issuer authorization and capture references, **Card retired**, the confirmed order, delivery, and final receipt. The card credential is injected only inside the isolated checkout capability and never appears in the task, projection, audit, worker record, log, or browser UI.
+2. Enter `Find an Apple Magic Keyboard` and press **Run purchase**. NaviPay reserves one unit before payment, verifies the seeded fake wallet, issues a disposable one-use card scoped to Orchard Electronics, XSGD 171.72, and MCC 5732, and starts a fresh bounded checkout worker profile.
+3. Observe the three stages, then open **Virtual card** for the safe masked reference, checkout submission, issuer authorization and capture references, and **Card retired** status. The confirmed order, delivery, and final receipt are shown on the primary path. The card credential is injected only inside the isolated checkout capability and never appears in the task, projection, audit, worker record, log, or browser UI.
 4. Repeat the same flow through the API to inspect the safe contract:
 
    ```sh
@@ -81,8 +81,8 @@ Then perform this exact test:
 1. Open <http://127.0.0.1:3000>.
 2. Enter `Find an Apple Magic Keyboard` in **Purchase instruction**.
 3. Enter `http://127.0.0.1:43123/competition-site/` in **Target commerce site**. This is the local replay merchant served by the demo command.
-4. Press **Discover and purchase**.
-5. Observe the **Local browser fixture** badge, the automatically selected Apple Magic Keyboard, why it won, source URL, observed time, and progress. No Advanced details or selection click is needed.
+4. Press **Run purchase**.
+5. Observe the **Local browser fixture** badge, the automatically selected Apple Magic Keyboard, why it won, source URL, observed time, and the three-stage tracker. No selection click is needed for a unique winner; evidence remains in collapsed Advanced details.
 6. Repeat with `I want a mouse` and `I want earphones` to exercise automatic mouse and earphone paths. A replay containing tied candidates pauses in **Advanced details**; a no-match or unsafe browser result is labelled and handled through the seeded fallback. Stop both local processes with Ctrl-C.
 
 The script serves `fixtures/competition-site/index.html` on port 43123 and starts NaviPay with Playwright discovery enabled, explicitly allowlisted to `127.0.0.1`. The target-site field never grants permission: a user URL is accepted only when its http or https scheme and host are already on that server-side allowlist. The worker sends no credentials and performs only bounded GET or HEAD reads. It never clicks search, checkout, order, or payment controls. The fixture's search form and product cards mirror the competition interaction while its normalized candidate payload is the deterministic replay seam.
