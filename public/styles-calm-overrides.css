@@ -181,3 +181,57 @@
 @media (prefers-reduced-motion: reduce) {
   .caret { animation: none; }
 }
+
+/* One calm order record owns the terminal result. */
+.attempted-purchase-panel {
+  padding: clamp(1rem, 2.8vw, 1.35rem);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-xl);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-card);
+}
+.attempted-purchase-panel .panel-heading { align-items: flex-start; }
+.attempted-purchase-panel h2 { max-width: 520px; margin: .25rem 0 .2rem; color: var(--color-ink); font-size: clamp(1.25rem, 3.8vw, 1.75rem); letter-spacing: -.05em; }
+.attempted-purchase-panel .status-pill { align-self: flex-start; }
+.attempted-purchase-panel .receipt-status-row { margin-top: .9rem; }
+.attempted-purchase-note { margin: .8rem 0 0; color: var(--color-ink-soft); font-size: .72rem; font-weight: 800; }
+.receipt-status-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin-top: .75rem; }
+.receipt-status-cell { min-width: 0; padding: .65rem .7rem; border-radius: var(--radius-md); background: rgba(217, 241, 229, .55); }
+.receipt-status-cell > span { display: block; color: var(--color-muted); font-size: .59rem; font-weight: 950; letter-spacing: .1em; text-transform: uppercase; }
+.receipt-status-cell strong { display: block; margin-top: .22rem; overflow-wrap: anywhere; color: var(--color-ink); font-size: .78rem; }
+.receipt-status-cell small { display: block; margin-top: .2rem; overflow-wrap: anywhere; color: var(--color-muted); font-size: .62rem; }
+.receipt-status-cell.active { background: rgba(255, 241, 190, .62); }
+.receipt-status-cell.attention { background: rgba(255, 224, 213, .72); }
+.receipt-status-cell.attention strong { color: #8b4935; }
+.receipt-panel .receipt-status-row { margin-top: .85rem; }
+.receipt-panel .selection-details,
+.attempted-purchase-panel .selection-details { margin-top: .7rem; }
+.receipt-panel .selection-details .detail-row,
+.attempted-purchase-panel .selection-details .detail-row { border-bottom-color: var(--color-line); }
+.receipt-panel .selection-details .detail-row dt,
+.attempted-purchase-panel .selection-details .detail-row dt { color: var(--color-muted); }
+.receipt-panel .selection-details .detail-row dd,
+.attempted-purchase-panel .selection-details .detail-row dd { color: var(--color-ink-soft); }
+.attempted-purchase-panel .candidate-row { border-color: var(--color-line); background: rgba(217, 241, 229, .42); color: var(--color-ink); }
+.attempted-purchase-panel .candidate-row span { color: var(--color-muted); }
+.attempted-purchase-panel .candidate-row small { color: var(--color-ink-soft); }
+.attempted-purchase-panel .candidate-row strong { color: var(--color-ink); }
+.receipt-footer { margin-top: .9rem; padding-top: .85rem; border-top: 1px solid var(--color-line); }
+.receipt-footer .overline { color: var(--color-muted); letter-spacing: .16em; }
+.receipt-footer .next-actions-list { margin-top: .5rem; }
+.receipt-footer .quiet-button { border-color: var(--color-line); color: var(--color-ink-soft); }
+.receipt-footer .quiet-button:hover { border-color: var(--color-ink-soft); background: rgba(217, 241, 229, .5); color: var(--color-ink); }
+.receipt-footer .next-action-choice { background: rgba(255, 241, 190, .55); }
+.receipt-footer .next-action-choice strong { color: var(--color-ink); }
+.receipt-footer .next-action-choice small { color: var(--color-muted); }
+.terminal-disclosure { margin: .8rem 0 0; color: var(--color-muted); font-family: var(--font-mono); font-size: .61rem; }
+
+@media (max-width: 650px) {
+  .receipt-status-row { gap: .35rem; }
+  .receipt-status-cell { padding: .6rem .55rem; }
+  .receipt-status-cell strong { font-size: .72rem; }
+  .receipt-status-cell small { font-size: .59rem; }
+  .attempted-purchase-panel .panel-heading { flex-direction: column; }
+  .attempted-purchase-panel .status-pill { align-self: flex-start; }
+}
