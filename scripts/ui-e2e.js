@@ -41,7 +41,7 @@ async function main() {
     let page = await snapshot();
     assert.match(page, /heading "What should we buy\?"/);
     assert.match(page, /button "Run purchase"/);
-    assert.match(page, /Optional browser evidence read-only and collapsed by default/);
+    assert.match(page, /Optional product evidence read-only and collapsed/);
     assert.doesNotMatch(page, /At a glance|Automatic progress|Disposable card issued/);
 
     await axi(['eval', "() => { window.__navipayFetch = window.fetch.bind(window); window.fetch = (...args) => String(args[0]).includes('/api/purchases/run') ? new Promise((resolve) => setTimeout(() => window.__navipayFetch(...args).then(resolve), 3000)) : window.__navipayFetch(...args); return 'run delay installed'; }"]);
@@ -51,27 +51,23 @@ async function main() {
     control = refFor(page, /button "Run purchase"/);
     await axi(['click', control]);
     const running = await snapshot();
-    assert.match(running, /StaticText "RUNNING"/);
-    assert.match(running, /StaticText "Discovery"/);
+    assert.match(running, /StaticText "WORKING ON IT"/);
+    assert.match(running, /StaticText "Find item"/);
     await axi(['wait', '3500']);
     page = await snapshot();
     assert.match(page, /heading "Logitech MX Master 3S"/);
     assert.match(page, /XSGD 121\.50/);
-    assert.match(page, /XSGD 378\.50/);
-    assert.match(page, /DisclosureTriangle "Purchase details/);
+    assert.match(page, /Purchase delivered/);
+    assert.match(page, /DisclosureTriangle "More about this purchase/);
     assert.doesNotMatch(page, /At a glance|Automatic progress|Disposable card issued/);
 
-    control = refFor(page, /button "Open virtual card drawer/);
+    control = refFor(page, /button "Payment Summary/);
     await axi(['click', control]);
     page = await snapshot();
-    assert.match(page, /dialog "Virtual card"/);
-    assert.match(page, /DisclosureTriangle "Mock KYC and funding/);
-    const fundingDisclosure = refFor(page, /DisclosureTriangle "Mock KYC and funding/);
-    await axi(['click', fundingDisclosure]);
-    page = await snapshot();
-    assert.match(page, /StaticText "KYC GATE"/);
-    assert.match(page, /StaticText "MOCK DESTINATION"/);
-    const close = refFor(page, /button "Close virtual card"/);
+    assert.match(page, /dialog "Payment summary"/);
+    assert.match(page, /Task-scoped demo balance/i);
+    assert.match(page, /Payment status/i);
+    const close = refFor(page, /button "Close payment summary"/);
     await axi(['click', close]);
 
     await axi(['eval', "fetch('/api/reset',{method:'POST'}).then(() => location.reload())"]);
@@ -88,11 +84,11 @@ async function main() {
     await axi(['click', control]);
     await axi(['wait', '500']);
     page = await snapshot();
-    assert.match(page, /No matching local item was found/);
-    assert.match(page, /StaticText "Discovery"/);
-    assert.match(page, /StaticText "needs attention"/);
-    assert.doesNotMatch(page, /XSGD 378\.50/);
-    console.log(`UI E2E passed: idle, running, success, no-match, drawer, disclosure, desktop, narrow (${base})`);
+    assert.match(page, /No matching item found/);
+    assert.match(page, /PURCHASE EFFECTS/);
+    assert.match(page, /No order/);
+    assert.match(page, /No receipt/);
+    console.log(`UI E2E passed: idle, running, success, no-match, drawer, desktop, narrow (${base})`);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
