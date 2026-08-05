@@ -12,7 +12,7 @@
     "demo:playwright": "node scripts/playwright-demo.js",
     "dev": "node --watch src/server.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check src/domain.js && node --check src/sandbox.js && node --check src/funding.js && node --check src/kyc.js && node --check src/issuer.js && node --check src/checkout-worker.js && node --check src/playwright-discovery.js && node --check src/playwright-discovery-worker.js && node --check src/server.js && node --check scripts/playwright-demo.js && node --check scripts/browser-e2e-runner.js && node --check public/app.js",
+    "check": "node --check src/domain.js && node --check src/agent-contract.js && node --check src/model-gateway.js && node --check src/agentic.js && node --check src/sandbox.js && node --check src/funding.js && node --check src/kyc.js && node --check src/issuer.js && node --check src/checkout-worker.js && node --check src/playwright-discovery.js && node --check src/playwright-discovery-worker.js && node --check src/server.js && node --check scripts/playwright-demo.js && node --check scripts/browser-e2e-runner.js && node --check public/app.js",
     "test:ui": "node scripts/browser-e2e-runner.js"
   }
 }

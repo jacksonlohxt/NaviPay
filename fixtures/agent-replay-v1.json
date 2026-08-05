@@ -1,0 +1,28 @@
+{
+  "bundleVersion": "agent-replay-v1",
+  "schemaVersion": 1,
+  "bundleId": "navipay-p0-showcase",
+  "model": "recorded-model-shape-v1",
+  "promptTemplateVersion": "prompt-v1",
+  "responses": [
+    {
+      "category": "keyboards",
+      "brand": "Apple",
+      "rationale": "Recorded model-shaped plan for a bounded keyboard purchase. This proposal is advisory and cannot authorize a side effect."
+    },
+    {
+      "category": "mice",
+      "brand": "Logitech",
+      "rationale": "Recorded model-shaped plan for a bounded mouse purchase. This proposal is advisory and cannot authorize a side effect."
+    },
+    {
+      "category": "earphones",
+      "rationale": "Recorded model-shaped plan for bounded earphone discovery. This proposal is advisory and cannot authorize a side effect."
+    },
+    {
+      "category": "default",
+      "rationale": "Recorded model-shaped plan for one bounded local purchase. This proposal is advisory and cannot authorize a side effect."
+    }
+  ],
+  "signature": "sha256:21e7a677876ce4e86a92cc83680c2275bfb035f8256cae8fa5f3d5ca4ffd9d5a"
+}

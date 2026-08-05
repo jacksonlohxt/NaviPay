@@ -8,7 +8,9 @@ NaviPay is one Node.js process with a durable JSON store. The server is the auth
 
 The default commerce authority is the seeded local catalog and the local merchant gateway in `src/sandbox.js`. Optional Playwright discovery is read-only evidence. It is server-allowlisted, bounded, and cross-checked against the seeded catalog before it can influence a purchase. It cannot reserve stock, authorize payment, place an order, or deliver anything.
 
-The service retains the legacy task shape for compatibility and exposes a versioned safe projection for browser reads. Projection builders redact sensitive fields before data reaches `public/app.js`. The browser-facing projection includes a versioned `customerOutcome` read model and bounded `nextActions`; these are the only source for default customer outcome copy and supported next steps.
+The service retains the legacy task shape for compatibility and exposes a versioned safe projection for browser reads. Projection builders redact sensitive fields before data reaches `public/app.js`. The browser-facing projection includes a versioned `customerOutcome` read model and bounded `nextActions`; these are the only source for default customer outcome copy and supported next steps. It also includes only a compact agent mode disclosure and four-stage customer status. Model proposals, observations, tool facts, and policy evidence stay in the separate read-only reviewer projection.
+
+P0 agent runs use `src/agent-contract.js`, `src/model-gateway.js`, and `src/agentic.js`. The default gateway is the offline `recorded_replay` gateway backed by the signed and versioned `fixtures/agent-replay-v1.json` bundle. `deterministic_fallback` is a network-free provider-neutral fallback. Both produce advisory typed proposals; neither can invoke an adapter or authorize a side effect. The server policy engine and existing local adapters remain authoritative.
 
 ## End-to-end request flow
 
@@ -28,13 +30,15 @@ The normal `POST /api/purchases/run` path is synchronous in the local demo, but 
 12. **Delivery.** `LocalDeliveryAdapter` independently records delivered or failed delivery, a simulated carrier, a tracking reference, and the fixture address label. Delivery failure does not rewrite payment or order history.
 13. **Receipt.** The service persists an immutable capture snapshot plus the current refund or reversal adjustment. The receipt is served through `GET /api/tasks/:id/receipt` and is the primary customer success artifact.
 
+The reviewer groups these internal boundaries into four auditable stages: **Funding** records local mock funding evidence before discovery without claiming live credit; **Discovery** records bounded candidate and quote evidence; **Issuance** records server-approved one-use instrument scope; and **Execution** records the local simulated checkout, ledger, order, fulfillment, delivery, and receipt. Execution is explicitly not real browser checkout.
+
 The visible customer path puts the outcome and receipt first, followed by item, merchant, total, order, preparation, delivery, and a server-authorized next action. It intentionally compresses implementation boundaries into Find item, Payment, and Order. Detailed evidence remains behind collapsed customer-question groups and the separate payment drawer; the default customer DOM does not render operator funding controls or raw implementation terminology.
 
 ## Data model and projections
 
 `src/store.js` owns version 2 JSON state and migrates version 1 state. It persists tasks, progress, idempotency records, operations, audits, wallets, ledger legs, merchant credits, inventory leases, issuer metadata, checkout sessions, orders, fulfillment, delivery, receipts, and payment adjustments. Writes use restricted files, a temporary file, fsync, and atomic rename.
 
-A task contains the original request and normalized intent, authorization envelope and decision, scenario, quote and locked snapshot, inventory reservation, funding observation, card metadata, checkout and payment outcome, financial snapshot, order, fulfillment, delivery, receipt, progress, automation status, and failure. Legacy fields remain for compatibility.
+A task contains the original request and normalized intent, authorization envelope and decision, scenario, quote and locked snapshot, inventory reservation, funding observation, card metadata, checkout and payment outcome, financial snapshot, order, fulfillment, delivery, receipt, progress, automation status, failure, and an opaque `agentRunId`. The safe agent run is persisted separately from the legacy task. It contains only bounded personal context, typed proposal, safe observations, the authoritative policy decision, four stages, budgets, and a checkpoint. No raw prompt, page content, provider payload, or credential is persisted in the agent contract.
 
 The browser projection is built in `projectTask` and related safe projection helpers in `src/sandbox.js`. It includes:
 
@@ -50,6 +54,8 @@ The browser projection is built in `projectTask` and related safe projection hel
 
 A task financial snapshot is authoritative for that task. The current global wallet is not a fallback for a failed or pre-payment task. A global wallet read is separate evidence. Initial fulfillment and delivery are `not_started`; they become pending only when their boundary begins.
 
+`GET /api/tasks/:id/reviewer`, `GET /api/runs/:runId/reviewer`, and `GET /api/tasks/:id/events` are read-only reviewer contracts. The reviewer shows mode and provenance, safe context summary, typed proposal, policy decision, safe tool facts, evidence references and hashes, budgets, retries, checkpoint, stage transitions, and final outcome. It does not include raw payloads or operator controls. `agentEvents` are normalized append-only envelopes with sequence and hash identities; `agentCheckpoints` support restart inspection. `rebuildAgentProjections` rebuilds the customer and reviewer read models from those agent events plus authoritative task facts.
+
 ## Failure, recovery, reconciliation, and refund semantics
 
 Every boundary returns a normalized status and records an operation. Side effects are protected by idempotency keys and stable references.
@@ -64,7 +70,7 @@ Every boundary returns a normalized status and records an operation. Side effect
 
 ## Security and redaction rules
 
-No live funds, custody, KYC, customer identity, PAN, CVV, provider secret, merchant credential, raw webhook, raw provider payload, or live delivery exists in this repository. Customer and delivery address data are replaceable fixtures.
+No live funds, custody, KYC, customer identity, PAN, CVV, provider secret, merchant credential, raw webhook, raw provider payload, or live delivery exists in this repository. Customer and delivery address data are replaceable fixtures. The recorded replay bundle is an offline integrity-checked fixture, not a live model response. Funding evidence uses local mock labels only, and checkout remains the existing local simulation. Hosted models, live XSGD, real card issuance, and real browser checkout remain future work.
 
 The issuer credential is held only by the isolated checkout capability. Task records, projections, audit events, logs, fixtures, and browser code receive card status, masked reference, and safe lifecycle references only. Source URLs are emitted only after server-side allowlist validation. Target URLs with usernames or passwords are rejected. Browser discovery uses bounded reads and no credentials.
 

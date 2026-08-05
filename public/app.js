@@ -432,6 +432,14 @@ function virtualCardDrawer(task) {
   return `<div class="drawer-backdrop" data-close-drawer><aside class="virtual-card-drawer" role="dialog" aria-modal="true" aria-labelledby="virtual-card-title" data-stop-drawer><div class="drawer-heading"><div><span class="overline">Payment</span><h2 id="virtual-card-title">Payment summary</h2></div><button type="button" class="close-button" data-close-drawer aria-label="Close payment summary">✕</button></div><div class="drawer-payment-amount"><span class="data-label">Amount</span><strong>${escapeHtml(task ? formatMoney(payment.amountMinor || taskQuote(task).totalMinor, currency) : 'Not started')}</strong><small>For this purchase only</small></div><div class="drawer-facts">${dataCell('Payment status', statusLabels[paymentStatus] || 'Not started', payment.status === 'unknown' ? 'Needs your confirmation' : 'Purchase payment')}${dataCell('Payment method', card ? 'One-use payment method' : 'Not available', 'Credentials are never shown')}${dataCell('Safe reference', shortId(safeReference), 'Safe reference only')}</div>${Number.isFinite(financial.finalBalanceMinor) ? `<div class="drawer-balance"><span class="data-label">Task-scoped demo balance</span><strong>${escapeHtml(balance)}</strong><small>This task snapshot only - never the global wallet balance</small></div>` : ''}<p class="drawer-disclosure">Local demo. Payment details are simulated and no real money is used.</p></aside></div>`;
 }
 
+function agentDisclosure(task) {
+  const agent = taskProjection(task).agent;
+  if (!agent) return '';
+  const labels = { completed: 'done', awaiting_input: 'waiting', blocked: 'stopped', skipped: 'not needed', running: 'in progress', not_started: 'waiting' };
+  const stages = (agent.stages || []).map((stage) => `${stage.stage}: ${labels[stage.status] || stage.status}`).join(' · ');
+  return `<p class="agent-disclosure" aria-label="Agent mode">Agent mode: <strong>${escapeHtml(agent.mode)}</strong>. ${escapeHtml(agent.disclosure)} <span class="agent-stage-summary">${escapeHtml(stages)}</span></p>`;
+}
+
 function runView(task) {
   const stages = lifecycleStages(task);
   const hasReceipt = (taskProjection(task).receipt || task.receipt)?.status === 'confirmed';
@@ -439,7 +447,7 @@ function runView(task) {
   const showStages = ['created', 'running', 'awaiting_selection', 'reconciliation_required'].includes(task.state) || outcomeCode === 'payment_unknown';
   const stagePanel = showStages ? `<section class="stage-card"><div class="panel-heading"><div><span class="overline">Purchase steps</span><h2>Simple, from item to order</h2></div><span class="stage-caption">${task.state === 'awaiting_selection' || task.state === 'reconciliation_required' ? 'Action needed below' : 'Updated now'}</span></div>${stageTracker(stages)}</section>` : '';
   const orderCard = hasReceipt ? receiptPanel(task) : attemptedPurchasePanel(task);
-  return `<section class="run-view"><div class="run-heading"><div><span class="overline">Purchase status</span><h1>${escapeHtml(taskRequest(task))}</h1></div><div class="run-actions">${modeBadge()}<button type="button" class="quiet-dark-button" data-new-purchase>New purchase</button></div></div>${outcome(task)}${orderCard}${stagePanel}${taskFacts(task)}${advancedDetails(task)}${historyDetails()}</section>`;
+  return `<section class="run-view"><div class="run-heading"><div><span class="overline">Purchase status</span><h1>${escapeHtml(taskRequest(task))}</h1></div><div class="run-actions">${modeBadge()}<button type="button" class="quiet-dark-button" data-new-purchase>New purchase</button></div></div>${agentDisclosure(task)}${outcome(task)}${orderCard}${stagePanel}${taskFacts(task)}${advancedDetails(task)}${historyDetails()}</section>`;
 }
 
 function updateHeader() {

@@ -23,6 +23,22 @@ const {
   normalizeDecision,
   stableReference: kycStableReference
 } = require('./kyc');
+const {
+  AllowlistedToolRegistry,
+  AgentPolicyEngine,
+  appendAgentEvent,
+  createAgentRun,
+  safeContextObservation,
+  recordBusinessPolicy,
+  recordObservation,
+  updateStage,
+  saveCheckpoint,
+  projectCustomerAgent,
+  projectReviewerRun,
+  rebuildAgentRunFromEvents
+} = require('./agentic');
+const { MODES, contentHash, parseAgentRun } = require('./agent-contract');
+const { createModelGateway, DeterministicFallbackGateway, ModelGatewayError } = require('./model-gateway');
 
 const SANDBOX_MODE = 'simulated local sandbox';
 const DEFAULT_ADAPTER_TIMEOUT_MS = 5000;
@@ -1728,7 +1744,7 @@ function projectFinancial(task, walletBalanceMinor = null) {
   };
 }
 
-function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMinor = null, sourceAllowlist = [] } = {}) {
+function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMinor = null, sourceAllowlist = [], agentRun = null } = {}) {
   const candidates = (task.quote?.candidates || []).map((candidate) => safeCandidate(candidate, { sourceAllowlist }));
   const selected = safeCandidate(task.quote?.lockedSnapshot, { sourceAllowlist }) || candidates.find((candidate) => candidate.id === task.quote?.selectedCandidateId) || null;
   const browserDiscovery = task.quote?.mode === 'read-only Playwright fixture';
@@ -1819,6 +1835,7 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     nextAction: task.automation?.nextAction || 'none',
+    agent: projectCustomerAgent(agentRun),
     customerOutcome: projectCustomerOutcome(task),
     nextActions: projectNextActions(task),
     request: {
@@ -1918,13 +1935,19 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
 }
 
 class NaviPaySandboxService {
-  constructor({ store, clock = () => new Date(), adapters = {}, fundingWebhookSecret = process.env.NAVIPAY_FUNDING_WEBHOOK_SECRET || null, kycWebhookSecret = process.env.NAVIPAY_KYC_WEBHOOK_SECRET || null } = {}) {
+  constructor({ store, clock = () => new Date(), adapters = {}, modelGateway = null, agentMode = process.env.NAVIPAY_AGENT_MODE || 'recorded_replay', fundingWebhookSecret = process.env.NAVIPAY_FUNDING_WEBHOOK_SECRET || null, kycWebhookSecret = process.env.NAVIPAY_KYC_WEBHOOK_SECRET || null } = {}) {
     if (!store) throw new Error('A store is required for the local sandbox.');
     this.kind = 'sandbox';
     this.store = store;
     this.clock = clock;
     this.fundingWebhookSecret = fundingWebhookSecret;
     this.kycWebhookSecret = kycWebhookSecret;
+    if (!MODES.includes(agentMode)) throw new SandboxDomainError(422, 'AGENT_MODE_UNSUPPORTED', 'P0 agent mode must be recorded_replay or deterministic_fallback.');
+    this.modelGateway = modelGateway || adapters.modelGateway || createModelGateway(agentMode);
+    this.fallbackModelGateway = new DeterministicFallbackGateway();
+    this.agentMode = this.modelGateway.mode || agentMode;
+    this.agentRegistry = new AllowlistedToolRegistry();
+    this.agentPolicy = new AgentPolicyEngine({ registry: this.agentRegistry });
     seedSandbox(store, clock);
     const localDiscovery = new LocalDiscoveryAdapter({ clock });
     this.localDiscoveryAdapter = localDiscovery;
@@ -2064,7 +2087,153 @@ class NaviPaySandboxService {
     });
   }
 
+  _prepareAgentRun(taskId) {
+    const task = this.getTask(taskId);
+    if (!task.agentRunId) return;
+    const existing = this.store.data.agentRuns[task.agentRunId];
+    if (!existing || existing.proposal) return;
+    let gateway = existing.mode === 'deterministic_fallback' ? this.fallbackModelGateway : this.modelGateway;
+    let result;
+    try {
+      result = gateway.propose({ runId: existing.id, intent: task.request?.intent, context: existing.context });
+    } catch (error) {
+      if (!(error instanceof ModelGatewayError) && !error?.code) throw error;
+      gateway = this.fallbackModelGateway;
+      result = gateway.propose({ runId: existing.id, intent: task.request?.intent, context: existing.context });
+    }
+    this.store.transaction((data) => {
+      const run = data.agentRuns[task.agentRunId];
+      if (!run || run.proposal) return;
+      run.mode = gateway.mode;
+      run.provenance = result.prompt?.inputHash ? { ...result.provenance, promptInputHash: result.prompt.inputHash } : result.provenance;
+      run.proposal = result.proposal;
+      run.status = 'running';
+      run.budgets.modelCalls += 1;
+      appendAgentEvent(data, { runId: run.id, type: 'model.proposed', idempotencyKey: run.proposal.proposalId, payload: { proposal: run.proposal, provenance: run.provenance }, clock: this.clock });
+      for (const toolProposal of run.proposal.toolProposals) appendAgentEvent(data, { runId: run.id, type: 'tool.proposed', stage: toolProposal.stage, idempotencyKey: `${toolProposal.id}-proposal`, payload: { toolProposal }, clock: this.clock });
+      recordObservation(data, run, safeContextObservation(run.id, task, this.clock), this.clock);
+      const fundingObservation = {
+        version: 1,
+        id: stableReference('OBSERVATION', `${run.id}:local-mock-funding`),
+        source: 'local_mock_provider',
+        kind: 'funding_evidence',
+        trust: 'trusted',
+        summary: 'Local mock funding event observed before discovery; no live provider activity is claimed.',
+        contentHash: contentHash(`${run.id}:local_mock_funding`),
+        observedAt: now(this.clock),
+        promptInjectionDetected: false,
+        ignored: false,
+        facts: { providerMode: 'local_mock', providerId: FUNDING_PROVIDER_ID, asset: CURRENCY, network: 'simulated_local_network' }
+      };
+      recordObservation(data, run, fundingObservation, this.clock);
+      updateStage(data, run, 'funding', 'completed', {
+        reason: 'Local mock funding evidence was recorded before discovery. This is not a live deposit or wallet credit.',
+        evidenceRefs: [stableReference('FUNDING-EVIDENCE', `${task.id}:local-mock`)],
+        internalSteps: [{ name: 'local mock funding event', status: 'completed', reference: stableReference('FUNDING-EVENT', task.id) }]
+      }, this.clock);
+      const advisory = this.agentPolicy.evaluate({ proposal: run.proposal, context: run.context });
+      const advisoryDecision = this.agentPolicy.fromBusinessDecision({ ...advisory, status: advisory.status === 'denied' ? 'rejected' : 'paused', code: advisory.reasonCodes[0], reason: advisory.reasons[0], checks: advisory.checks, decisionId: advisory.decisionId, decidedAt: now(this.clock) }, this.clock);
+      recordBusinessPolicy(data, run, advisoryDecision, this.clock);
+      saveCheckpoint(data, run, { name: 'funding-evidence-recorded', stage: 'funding', status: 'completed', resumable: true }, this.clock);
+      data.agentRuns[run.id] = parseAgentRun(run);
+    });
+  }
+
+  _refreshAgentRun(taskId) {
+    const task = this.store.data.tasks[taskId];
+    if (!task?.agentRunId || !this.store.data.agentRuns[task.agentRunId]) return;
+    this.store.transaction((data) => {
+      const currentTask = data.tasks[taskId];
+      const run = data.agentRuns[currentTask.agentRunId];
+      const internal = (names) => names.flatMap((name) => {
+        const progress = currentTask.progress?.find((item) => item.stage === name);
+        if (!progress) return [];
+        const statusMap = { pending: 'not_started', running: 'running', completed: 'completed', failed: 'blocked', unknown: 'awaiting_input', skipped: 'skipped', not_started: 'not_started' };
+        const reference = progress.reference && !/[:/?#]/.test(String(progress.reference)) ? progress.reference : progress.reference ? stableReference('STEP', progress.reference) : null;
+        return [{ name, status: statusMap[progress.status] || 'not_started', reference }];
+      });
+      const failureStage = currentTask.failure?.stage || null;
+      const discoveryStatus = currentTask.quote ? 'completed' : failureStage === 'discovery' || failureStage === 'quote' ? 'blocked' : 'not_started';
+      const issuanceStatus = currentTask.card ? 'completed' : failureStage === 'payment' || failureStage === 'issuance' ? 'blocked' : currentTask.authorizationDecision?.status === 'approved' ? 'running' : 'not_started';
+      const executionStatus = currentTask.receipt ? 'completed' : currentTask.state === 'reconciliation_required' || currentTask.state === 'card_issued' || currentTask.payment?.status === 'unknown' ? 'awaiting_input' : failureStage && ['payment', 'merchant_credit', 'order', 'fulfillment', 'delivery'].includes(failureStage) ? 'blocked' : currentTask.card ? 'running' : 'not_started';
+      updateStage(data, run, 'discovery', discoveryStatus, { reason: currentTask.quote ? 'Discovery returned bounded candidates and the server locked or reviewed the authoritative quote.' : 'Discovery has not produced a safe quote.', evidenceRefs: currentTask.quote ? [currentTask.quote.quoteId || stableReference('QUOTE', taskId)] : [], internalSteps: internal(['discovery', 'quote']) }, this.clock);
+      updateStage(data, run, 'issuance', issuanceStatus, { reason: currentTask.card ? 'The server policy approved a one-use scoped instrument.' : failureStage === 'payment' ? 'Issuance or payment was blocked by the server policy or local issuer.' : 'Issuance awaits the authoritative server policy decision.', evidenceRefs: currentTask.card?.reference ? [currentTask.card.reference] : [], internalSteps: internal(['payment']) }, this.clock);
+      updateStage(data, run, 'execution', executionStatus, { reason: currentTask.receipt ? 'The local merchant, ledger, order, fulfillment, delivery, and receipt lifecycle completed.' : currentTask.payment?.status === 'unknown' ? 'Execution is waiting for explicit payment reconciliation. No retry is automatic.' : 'Execution has not produced a terminal customer outcome.', evidenceRefs: currentTask.receipt?.id ? [currentTask.receipt.id] : [], internalSteps: internal(['merchant_credit', 'order', 'fulfillment', 'delivery', 'receipt']) }, this.clock);
+      const toolResults = [
+        { stage: 'funding', name: 'funding.observe_local_mock', status: run.stages.find((item) => item.stage === 'funding').status, reference: run.stages.find((item) => item.stage === 'funding').evidenceRefs[0] || null, disclosure: 'Local mock funding evidence only.' },
+        { stage: 'discovery', name: 'catalog.search', status: discoveryStatus, reference: currentTask.quote?.quoteId || null, disclosure: 'Bounded seeded catalog observation.' },
+        { stage: 'issuance', name: 'issuance.issue_scoped_instrument', status: issuanceStatus, reference: currentTask.card?.reference || null, disclosure: 'Server-scoped local instrument result.' },
+        { stage: 'execution', name: 'execution.run_local_checkout', status: executionStatus, reference: currentTask.checkout?.checkoutReference || currentTask.receipt?.id || null, disclosure: 'Simulated local checkout result, not real browser checkout.' }
+      ];
+      for (const toolResult of toolResults) {
+        if (toolResult.status === 'not_started') continue;
+        const alreadyRecorded = data.agentEvents.some((event) => event.runId === run.id && event.type === 'tool.resulted' && event.payload?.toolResult?.stage === toolResult.stage && event.payload?.toolResult?.status === toolResult.status);
+        if (!alreadyRecorded) {
+          appendAgentEvent(data, { runId: run.id, type: 'tool.resulted', stage: toolResult.stage, idempotencyKey: `${run.id}-tool-result-${toolResult.stage}-${toolResult.status}`, payload: { toolResult: { ...toolResult, authoritative: true } }, clock: this.clock });
+          run.budgets.toolCalls += 1;
+        }
+      }
+      if (['completed'].includes(currentTask.state)) run.status = 'completed';
+      else if (['failed'].includes(currentTask.state)) run.status = 'failed';
+      else if (['reconciliation_required', 'awaiting_selection'].includes(currentTask.state) || executionStatus === 'awaiting_input') run.status = 'awaiting_input';
+      else if (run.proposal) run.status = 'running';
+      const checkpointStage = executionStatus === 'completed' ? 'execution' : issuanceStatus === 'completed' ? 'issuance' : discoveryStatus === 'completed' ? 'discovery' : 'funding';
+      const checkpointStatus = run.stages.find((item) => item.stage === checkpointStage)?.status || 'not_started';
+      const checkpointName = currentTask.state === 'card_issued' ? 'card-issued' : currentTask.state === 'reconciliation_required' ? 'payment-reconciliation-required' : currentTask.state === 'completed' ? 'run-complete' : currentTask.state === 'failed' ? 'run-stopped' : `${checkpointStage}-checkpoint`;
+      if (!run.checkpoint || run.checkpoint.name !== checkpointName || run.checkpoint.status !== checkpointStatus) saveCheckpoint(data, run, { name: checkpointName, stage: checkpointStage, status: checkpointStatus, resumable: !['completed', 'failed'].includes(currentTask.state) }, this.clock);
+      run.outcome = { status: currentTask.state, code: currentTask.failure?.code || currentTask.authorizationDecision?.code || null, receiptReference: currentTask.receipt?.id || null, customerStatus: currentTask.purchaseStatus || currentTask.state };
+      const priorOutcome = data.agentEvents.filter((event) => event.runId === run.id && event.type === 'outcome.recorded').at(-1)?.payload?.outcome;
+      if (JSON.stringify(priorOutcome || null) !== JSON.stringify(run.outcome)) appendAgentEvent(data, { runId: run.id, type: 'outcome.recorded', stage: 'execution', idempotencyKey: `${run.id}-outcome-${currentTask.state}-${run.outcome.code || 'none'}-${run.outcome.receiptReference || 'none'}`, payload: { outcome: run.outcome }, clock: this.clock });
+      data.agentRuns[run.id] = parseAgentRun(run);
+    });
+  }
+
+  getReviewerProjection(taskId) {
+    const initialTask = this.getTask(taskId);
+    if (initialTask.agentRunId && !this.store.data.agentRuns[initialTask.agentRunId]?.proposal) this._prepareAgentRun(taskId);
+    this._refreshAgentRun(taskId);
+    const task = this.store.data.tasks[taskId];
+    const run = this.store.data.agentRuns[task.agentRunId];
+    if (!run) throw new SandboxDomainError(404, 'AGENT_RUN_NOT_FOUND', 'That purchase has no agent run.');
+    const taskProjection = projectTask(task, { operations: this.store.data.operations, auditEvents: this.store.data.auditEvents, walletBalanceMinor: this.store.data.wallets[task.walletId]?.balanceMinor ?? null, sourceAllowlist: this.discoveryAdapter.allowlist || [], agentRun: run });
+    return projectReviewerRun({ run, events: this.store.data.agentEvents.filter((event) => event.runId === run.id), taskProjection, toolRegistry: this.agentRegistry });
+  }
+
+  getReviewerProjectionByRun(runId) {
+    const run = this.store.data.agentRuns[runId];
+    if (!run) throw new SandboxDomainError(404, 'AGENT_RUN_NOT_FOUND', 'That agent run does not exist.');
+    return this.getReviewerProjection(run.taskId);
+  }
+
+  getAgentEvents(taskId) {
+    const task = this.getTask(taskId);
+    return clone(this.store.data.agentEvents.filter((event) => event.runId === task.agentRunId).map((event) => ({ eventId: event.eventId, runId: event.runId, taskId: event.taskId, sequence: event.sequence, type: event.type, stage: event.stage, occurredAt: event.occurredAt, actor: event.actor, idempotencyKey: event.idempotencyKey, payloadHash: event.payloadHash, previousHash: event.previousHash })));
+  }
+
+  getAgentCheckpoint(taskId) {
+    const task = this.getTask(taskId);
+    const checkpoint = this.store.data.agentCheckpoints[task.agentRunId] || this.store.data.agentRuns[task.agentRunId]?.checkpoint;
+    if (!checkpoint) throw new SandboxDomainError(404, 'AGENT_CHECKPOINT_NOT_FOUND', 'That purchase has no agent checkpoint.');
+    return clone(checkpoint);
+  }
+
+  rebuildProjections(taskId) {
+    return this.rebuildAgentProjections(taskId);
+  }
+
+  rebuildAgentProjections(taskId) {
+    const task = this.getTask(taskId);
+    this._refreshAgentRun(taskId);
+    const run = this.store.data.agentRuns[task.agentRunId];
+    const events = this.store.data.agentEvents.filter((event) => event.runId === run.id);
+    const rebuiltRun = rebuildAgentRunFromEvents(run, events);
+    const customer = projectTask(task, { operations: this.store.data.operations, auditEvents: this.store.data.auditEvents, walletBalanceMinor: this.store.data.wallets[task.walletId]?.balanceMinor ?? null, sourceAllowlist: this.discoveryAdapter.allowlist || [], agentRun: rebuiltRun });
+    const reviewer = projectReviewerRun({ run: rebuiltRun, events, taskProjection: customer, toolRegistry: this.agentRegistry });
+    return { customer, reviewer };
+  }
+
   _response(taskId, statusCode = 200, replayed = false) {
+    this._refreshAgentRun(taskId);
     const task = this.getTask(taskId);
     const runStatus = task.automation.status;
     const projection = this.getTaskProjection(taskId);
@@ -2083,8 +2252,9 @@ class NaviPaySandboxService {
     return { status: approved ? 'approved' : 'blocked', url: approved ? url : null };
   }
 
-  createTask({ request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator', replayOf = null, paymentMode = 'issuer_authorization', allowInvalid = false } = {}) {
+  createTask({ request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator', replayOf = null, paymentMode = 'issuer_authorization', allowInvalid = false, agentMode = this.agentMode } = {}) {
     if (!SANDBOX_SCENARIOS.has(scenario)) throw new SandboxDomainError(400, 'INVALID_SCENARIO', `Unknown sandbox scenario: ${scenario}.`);
+    if (!MODES.includes(agentMode)) throw new SandboxDomainError(422, 'AGENT_MODE_UNSUPPORTED', 'P0 agent mode must be recorded_replay or deterministic_fallback.');
     const targetSiteRecord = this._targetSiteRecord(targetSite === undefined ? targetUrl : targetSite);
     let raw;
     let intent;
@@ -2173,9 +2343,16 @@ class NaviPaySandboxService {
       progress: stageTemplate(),
       automation: { status: 'not_started', automatic: true, startedAt: null, completedAt: null, nextAction: 'Run purchase to begin the simulated purchase.' }
     };
+    const gateway = agentMode === this.modelGateway.mode ? this.modelGateway : agentMode === 'deterministic_fallback' ? this.fallbackModelGateway : createModelGateway(agentMode);
+    const provenance = gateway.getProvenance();
+    const agentRun = createAgentRun({ task, mode: agentMode, provenance, clock: this.clock });
+    task.agentRunId = agentRun.id;
     this.store.transaction((data) => {
       data.tasks[task.id] = task;
+      data.agentRuns[agentRun.id] = agentRun;
       this._audit(data, task.id, 'purchase.created', 'info', 'Simulated purchase request recorded.', { operationId: operationId(task.id, 'intent'), request: raw, customer: DEMO_CUSTOMER.name });
+      appendAgentEvent(data, { runId: agentRun.id, type: 'run.created', idempotencyKey: agentRun.id, payload: { mode: agentRun.mode, provenance: agentRun.provenance }, clock: this.clock });
+      appendAgentEvent(data, { runId: agentRun.id, type: 'context.assembled', idempotencyKey: `${agentRun.id}-context`, payload: { context: agentRun.context }, clock: this.clock });
     });
     return clone(task);
   }
@@ -2202,7 +2379,8 @@ class NaviPaySandboxService {
       operations: this.store.data.operations,
       auditEvents: this.store.data.auditEvents,
       walletBalanceMinor: this.store.data.wallets[task.walletId]?.balanceMinor ?? null,
-      sourceAllowlist: this.discoveryAdapter.allowlist || []
+      sourceAllowlist: this.discoveryAdapter.allowlist || [],
+      agentRun: task.agentRunId ? this.store.data.agentRuns[task.agentRunId] || null : null
     });
   }
 
@@ -2689,6 +2867,8 @@ class NaviPaySandboxService {
         code,
         decision: safeAuthorizationDecision(decision)
       });
+      const run = data.agentRuns[task.agentRunId];
+      if (run) recordBusinessPolicy(data, run, this.agentPolicy.fromBusinessDecision(decision, this.clock), this.clock);
     });
     return decision;
   }
@@ -2934,6 +3114,8 @@ class NaviPaySandboxService {
     let task = this.getTask(taskId);
     let cardIssuedThisRun = false;
     if (['completed', 'failed', 'reconciliation_required'].includes(task.state)) return this._response(taskId);
+    this._prepareAgentRun(taskId);
+    task = this.getTask(taskId);
     this._updateTask(taskId, (current) => { current.automation = { ...current.automation, status: 'running', automatic, startedAt: current.automation.startedAt || now(this.clock), nextAction: 'NaviPay is running the simulated purchase.' }; });
 
     task = this.getTask(taskId);
@@ -3483,11 +3665,11 @@ class NaviPaySandboxService {
     return previous;
   }
 
-  startPurchase({ idempotencyKey, request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator', paymentMode = 'issuer_authorization' } = {}) {
+  startPurchase({ idempotencyKey, request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator', paymentMode = 'issuer_authorization', agentMode = this.agentMode } = {}) {
     if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) throw new SandboxDomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key for the purchase run.');
     const requestedTargetSite = targetSite === undefined ? targetUrl : targetSite;
-    const fingerprint = JSON.stringify({ request, targetSite: requestedTargetSite, scenario, origin, paymentMode });
-    const taskInput = { request, targetSite: requestedTargetSite, scenario, origin, paymentMode };
+    const fingerprint = JSON.stringify({ request, targetSite: requestedTargetSite, scenario, origin, paymentMode, agentMode });
+    const taskInput = { request, targetSite: requestedTargetSite, scenario, origin, paymentMode, agentMode };
     const key = `sandbox:start:${idempotencyKey}`;
     const previous = this._readIdempotency(key, fingerprint);
     if (previous?.response) return { ...clone(previous.response), replayed: true };
