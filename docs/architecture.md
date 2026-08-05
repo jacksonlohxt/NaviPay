@@ -8,7 +8,7 @@ NaviPay is one Node.js process with a durable JSON store. The server is the auth
 
 The default commerce authority is the seeded local catalog and the local merchant gateway in `src/sandbox.js`. Optional Playwright discovery is read-only evidence. It is server-allowlisted, bounded, and cross-checked against the seeded catalog before it can influence a purchase. It cannot reserve stock, authorize payment, place an order, or deliver anything.
 
-The service retains the legacy task shape for compatibility and exposes a versioned safe projection for browser reads. Projection builders redact sensitive fields before data reaches `public/app.js`.
+The service retains the legacy task shape for compatibility and exposes a versioned safe projection for browser reads. Projection builders redact sensitive fields before data reaches `public/app.js`. The browser-facing projection includes a versioned `customerOutcome` read model and bounded `nextActions`; these are the only source for default customer outcome copy and supported next steps.
 
 ## End-to-end request flow
 
@@ -28,7 +28,7 @@ The normal `POST /api/purchases/run` path is synchronous in the local demo, but 
 12. **Delivery.** `LocalDeliveryAdapter` independently records delivered or failed delivery, a simulated carrier, a tracking reference, and the fixture address label. Delivery failure does not rewrite payment or order history.
 13. **Receipt.** The service persists an immutable capture snapshot plus the current refund or reversal adjustment. The receipt is served through `GET /api/tasks/:id/receipt` and is the primary customer success artifact.
 
-The visible purchase steps intentionally compress these boundaries into Find item, Payment, and Order. Detailed evidence remains behind collapsed customer-question groups.
+The visible customer path puts the outcome and receipt first, followed by item, merchant, total, order, preparation, delivery, and a server-authorized next action. It intentionally compresses implementation boundaries into Find item, Payment, and Order. Detailed evidence remains behind collapsed customer-question groups and the separate payment drawer; the default customer DOM does not render operator funding controls or raw implementation terminology.
 
 ## Data model and projections
 
@@ -44,6 +44,8 @@ The browser projection is built in `projectTask` and related safe projection hel
 - task-owned financial values: before payment, after payment, final balance, net charged, net refunded, and compensation status;
 - safe payment and card lifecycle status;
 - order, fulfillment, delivery, tracking, receipt, safe operation references, and timeline;
+- `customerOutcome` version 1 with a plain-language status, title, message, and compact payment/order/preparation/delivery/receipt side-effects summary;
+- bounded `nextActions` entries with versioned stable IDs, customer labels, enabled state, and policy reasons. Supported IDs are `new_purchase`, `choose_item`, `reconcile_payment`, `view_receipt`, and `view_details`;
 - only redacted customer and provider-adjacent facts.
 
 A task financial snapshot is authoritative for that task. The current global wallet is not a fallback for a failed or pre-payment task. A global wallet read is separate evidence. Initial fulfillment and delivery are `not_started`; they become pending only when their boundary begins.
@@ -91,7 +93,7 @@ npm install
 npm start
 ```
 
-Open <http://127.0.0.1:3000>, enter `buy a Logitech mouse`, and press **Run purchase**. Use the **Payment** summary for safe card and payment facts. Use the collapsed technical groups only when reviewing selection, payment, order, or activity evidence. `POST /api/reset` or a separate `NAVIPAY_DATA_FILE` restores an isolated seeded wallet and inventory fixture.
+Open <http://127.0.0.1:3000>, enter `buy a Logitech mouse`, and press **Run purchase**. Use the **Payment** summary for task-scoped payment facts. Use the collapsed purchase details only when reviewing selection, payment, order, or activity evidence. `POST /api/reset` or a separate `NAVIPAY_DATA_FILE` restores an isolated seeded wallet and inventory fixture.
 
 Validation commands:
 

@@ -59,6 +59,12 @@ function assertDefaultSurface(text, label) {
   for (const jargon of ['KYC', 'funding intent', 'MCC', 'issuer', 'authorization', 'capture', 'ledger', 'webhook', 'operation ID', 'provider reference', 'SIMULATED ONLY', 'NO REAL FUNDS']) {
     assert.doesNotMatch(text, new RegExp(`\\b${jargon}\\b`, 'i'), `${label}: technical jargon leaked into the default surface: ${jargon}`);
   }
+  const domText = runChrome(['eval', '() => document.body.textContent']);
+  for (const jargon of ['PAN', 'CVV', 'private key', 'raw provider payload', 'MCC', 'ledger', 'webhook', 'issuer-secret', 'adapter']) {
+    assert.doesNotMatch(domText, new RegExp(jargon, 'i'), `${label}: technical jargon leaked into the customer DOM: ${jargon}`);
+  }
+  const overflow = runChrome(['eval', '() => document.documentElement.scrollWidth <= window.innerWidth ? "no-overflow" : `overflow-${document.documentElement.scrollWidth}`']);
+  assert.match(overflow, /no-overflow/, `${label}: horizontal overflow`);
 }
 
 async function resetAndOpen() {
@@ -88,15 +94,15 @@ async function main() {
   text = pageText();
   assert.match(text, /Working on it|Running/);
   assert.match(text, /Find item/);
-  text = waitForText(/Purchase complete/);
-  assert.match(text, /Purchase complete/);
+  text = waitForText(/Purchase delivered|Purchase complete/);
+  assert.match(text, /Purchase delivered/);
   assert.match(text, /Logitech MX Master 3S/);
   assert.match(text, /Harbor Supply/);
   assert.match(text, /XSGD 121\.50/);
   assert.match(text, /Order confirmed/);
   assert.match(text, /Delivered/);
   assert.match(text, /Receipt/);
-  assert.match(text, /Technical overview/);
+  assert.match(text, /ORDER STATUS/i);
   assertDefaultSurface(text, 'success');
   assert.doesNotMatch(text, /More about this purchase\nEvidence, references, and activity\n[^]*Ledger transaction/);
   assert.doesNotMatch(text, /Remaining demo balance|Task-scoped demo balance/);
@@ -131,8 +137,8 @@ async function main() {
   await post('/api/purchases/run', { request: 'buy a holographic toaster', scenario: 'no-match' }, { 'Idempotency-Key': `ui-no-match-${process.pid}` });
   runChrome(['open', baseUrl]);
   text = pageText();
-  assert.match(text, /Purchase not completed/);
-  assert.match(text, /No matching local item was found/);
+  assert.match(text, /No matching item found/);
+  assert.match(text, /PURCHASE EFFECTS/i);
   assert.match(text, /Nothing was reserved or paid/);
   assert.doesNotMatch(text, /Purchase confirmed|Purchase complete/);
   assertDefaultSurface(text, 'no-match');
@@ -142,13 +148,75 @@ async function main() {
   await post('/api/purchases/run', { request: 'buy a Logitech mouse', scenario: 'unknown-payment' }, { 'Idempotency-Key': `ui-unknown-${process.pid}` });
   runChrome(['open', baseUrl]);
   text = pageText();
-  assert.match(text, /Please confirm the payment/);
-  assert.match(text, /No retry will happen/);
+  assert.match(text, /Payment status needs confirmation/);
+  assert.match(text, /No automatic retry will occur/);
+  assert.match(text, /No order/);
+  assert.match(text, /No receipt/);
   assert.match(text, /Payment was approved/);
   assert.match(text, /Payment was declined/);
   assertDefaultSurface(text, 'unknown payment');
 
-  console.log('UI assertions passed: idle, running, success, payment drawer, narrow, no-match, and unknown payment.');
+  // Delivery attention preserves payment, order, and receipt truth.
+  await resetAndOpen();
+  await post('/api/purchases/run', { request: 'buy a Logitech mouse', scenario: 'delivery-failure' }, { 'Idempotency-Key': `ui-delivery-failure-${process.pid}` });
+  runChrome(['open', baseUrl]);
+  text = pageText();
+  assert.match(text, /Delivery needs attention/);
+  assert.match(text, /Payment is confirmed/);
+  assert.match(text, /Order confirmed/);
+  assert.match(text, /Purchase confirmed/);
+  assertDefaultSurface(text, 'delivery failure');
+
+  // No-purchase states expose the reason and explicit downstream side effects.
+  for (const [label, body, expected] of [
+    ['over budget', { request: 'buy a keyboard', scenario: 'over-budget' }, /over the purchase limit/],
+    ['ambiguity', { request: 'buy a keyboard', scenario: 'ambiguity' }, /Choose an item to continue/],
+    ['out of stock', { request: 'buy a Razer mouse', scenario: 'out-of-stock' }, /Item is out of stock/],
+    ['insufficient funds', { request: 'buy a keyboard', scenario: 'insufficient-funds' }, /Not enough balance/],
+    ['declined payment', { request: 'buy a keyboard', scenario: 'payment-decline' }, /Payment was declined/]
+  ]) {
+    await resetAndOpen();
+    await post('/api/purchases/run', body, { 'Idempotency-Key': `ui-${label.replaceAll(' ', '-')}-${process.pid}` });
+    runChrome(['open', baseUrl]);
+    text = pageText();
+    assert.match(text, expected, label);
+    assert.match(text, /No order|No confirmed order/, label);
+    assert.match(text, /No receipt/, label);
+    assertDefaultSurface(text, label);
+  }
+
+  // Unknown payment survives a reload, then uses the authoritative idempotent reconciliation route.
+  await resetAndOpen();
+  const unknown = await post('/api/purchases/run', { request: 'buy a Logitech mouse', scenario: 'unknown-payment' }, { 'Idempotency-Key': `ui-reload-unknown-${process.pid}` });
+  const unknownTaskId = unknown.payload.task.id;
+  runChrome(['open', baseUrl]);
+  assert.match(pageText(), /Payment status needs confirmation/);
+  const reconciled = await post(`/api/tasks/${unknownTaskId}/payment/reconcile`, { resolution: 'authorized' }, { 'Idempotency-Key': `ui-reconcile-${process.pid}` });
+  assert.equal(reconciled.response.status, 200);
+  runChrome(['open', baseUrl]);
+  text = pageText();
+  assert.match(text, /Purchase delivered/);
+  assert.doesNotMatch(text, /No automatic retry will occur/);
+  assertDefaultSurface(text, 'reconciled payment');
+
+  // Refund and reversal keep the immutable original receipt visible next to the current update.
+  for (const kind of ['refund', 'reverse']) {
+    await resetAndOpen();
+    const completed = await post('/api/purchases/run', { request: 'buy a Logitech mouse' }, { 'Idempotency-Key': `ui-${kind}-purchase-${process.pid}` });
+    await post(`/api/tasks/${completed.payload.task.id}/payment/${kind}`, {}, { 'Idempotency-Key': `ui-${kind}-adjust-${process.pid}` });
+    runChrome(['open', baseUrl]);
+    text = pageText();
+    assert.match(text, kind === 'refund' ? /Payment refunded/ : /Payment reversed/);
+    assert.match(text, /immutable original purchase record/);
+    assert.match(text, /CURRENT PAYMENT UPDATE/i);
+    assert.match(text, /XSGD 0\.00/);
+    assertDefaultSurface(text, `${kind} payment`);
+  }
+
+  runChrome(['resize', '390', '844']);
+  const finalNarrow = runChrome(['eval', '() => document.documentElement.scrollWidth <= window.innerWidth ? "narrow-ok" : `overflow-${document.documentElement.scrollWidth}`']);
+  assert.match(finalNarrow, /narrow-ok/);
+  console.log('UI assertions passed: idle, running, success, delivery, failure states, unknown reload/reconcile, refund/reversal, drawer, and narrow.');
 }
 
 main()

@@ -79,6 +79,7 @@ const SANDBOX_SCENARIOS = new Set([
   'merchant-credit-failure',
   'funding-failure',
   'discovery-failure',
+  'invalid-request',
   'decline',
   'merchant-decline',
   'checkout-failure',
@@ -1198,6 +1199,251 @@ function safeFundingIntent(intent) {
 }
 
 const TASK_PROJECTION_VERSION = 1;
+const CUSTOMER_OUTCOME_VERSION = 1;
+const CUSTOMER_ACTION_VERSION = 1;
+
+const CUSTOMER_OUTCOME_BY_FAILURE = Object.freeze({
+  NO_LOCAL_MATCHES: 'no_match',
+  DISCOVERY_NO_MATCH: 'no_match',
+  AMBIGUOUS_MATCH: 'ambiguity',
+  SPENDING_CEILING_EXCEEDED: 'over_budget',
+  OUT_OF_STOCK: 'out_of_stock',
+  INSUFFICIENT_FUNDS: 'insufficient_funds',
+  PAYMENT_DECLINED: 'declined_payment',
+  PAYMENT_DECLINED_RECONCILED: 'declined_payment',
+  INVALID_PURCHASE_REQUEST: 'invalid_request',
+  MISSING_PRODUCT_TYPE: 'invalid_request',
+  INVALID_QUANTITY: 'invalid_request',
+  QUANTITY_UNSUPPORTED: 'invalid_request',
+  AUTHORITATIVE_QUOTE_MISMATCH: 'invalid_request',
+  QUOTE_EXPIRED: 'invalid_request',
+  KYC_NOT_APPROVED: 'invalid_request',
+  MERCHANT_CATEGORY_NOT_ALLOWED: 'invalid_request',
+  POLICY_BLOCKED: 'invalid_request',
+  RISK_BLOCKED: 'invalid_request',
+  DUPLICATE_INSTRUCTION: 'invalid_request'
+});
+
+function customerSideEffect(status, label, detail) {
+  return { status, label, detail };
+}
+
+function projectCustomerSideEffects(task) {
+  const paymentStatus = task.payment?.status || 'not_started';
+  const payment = paymentStatus === 'unknown' || task.state === 'reconciliation_required'
+    ? customerSideEffect('needs_confirmation', 'Needs confirmation', 'Payment status needs confirmation.')
+    : paymentStatus === 'authorized'
+      ? customerSideEffect('paid', 'Paid', 'Payment is confirmed.')
+      : paymentStatus === 'refunded'
+        ? customerSideEffect('refunded', 'Refunded', 'The current payment was refunded.')
+        : paymentStatus === 'reversed'
+          ? customerSideEffect('reversed', 'Reversed', 'The current payment was reversed.')
+          : paymentStatus === 'compensated'
+            ? customerSideEffect('returned', 'Payment returned', 'Payment was returned and no confirmed order remains.')
+            : paymentStatus === 'declined'
+              ? customerSideEffect('not_paid', 'No payment', 'Payment was declined. Nothing was paid.')
+              : customerSideEffect('not_started', 'No payment', 'No payment was made.');
+  const orderStatus = task.order?.status || 'not_started';
+  const order = orderStatus === 'confirmed'
+    ? customerSideEffect('confirmed', 'Confirmed', 'Order confirmed.')
+    : orderStatus === 'failed'
+      ? customerSideEffect('not_confirmed', 'No confirmed order', 'No confirmed order remains.')
+      : orderStatus === 'pending_inventory_commit'
+        ? customerSideEffect('processing', 'Being confirmed', 'Order confirmation is still in progress.')
+        : customerSideEffect('not_started', 'No order', 'No order was created.');
+  const fulfillmentStatus = task.fulfillment?.status || 'not_started';
+  const fulfillment = fulfillmentStatus === 'fulfilled'
+    ? customerSideEffect('prepared', 'Prepared', 'Order preparation is complete.')
+    : fulfillmentStatus === 'failed'
+      ? customerSideEffect('attention', 'Needs attention', 'Order preparation needs attention.')
+      : fulfillmentStatus === 'pending'
+        ? customerSideEffect('processing', 'In progress', 'Order preparation is in progress.')
+        : customerSideEffect('not_started', 'Not started', 'Order preparation did not start.');
+  const deliveryStatus = task.delivery?.status || 'not_started';
+  const delivery = deliveryStatus === 'delivered'
+    ? customerSideEffect('delivered', 'Delivered', 'Delivery is complete.')
+    : deliveryStatus === 'failed'
+      ? customerSideEffect('failed', 'Needs attention', 'Delivery could not be completed.')
+      : deliveryStatus === 'pending'
+        ? customerSideEffect('pending', 'Pending', task.delivery?.trackingReference ? 'Delivery is pending. Simulated tracking is available.' : 'Delivery is pending. No tracking update is available.')
+        : customerSideEffect('not_started', 'No delivery update', 'Delivery did not start.');
+  const receipt = task.receipt?.status === 'confirmed'
+    ? customerSideEffect('ready', 'Receipt ready', 'Receipt is ready.')
+    : customerSideEffect('not_started', 'No receipt', 'No receipt was issued.');
+  const reservationStatus = task.inventory?.reservation?.status || 'not_started';
+  const inventory = reservationStatus === 'reserved'
+    ? customerSideEffect('held', 'Item held', 'The item is held while payment is confirmed.')
+    : reservationStatus === 'committed'
+      ? customerSideEffect('committed', 'Item committed', 'The item was committed to the order.')
+      : reservationStatus === 'released'
+        ? customerSideEffect('released', 'No item held', 'The item hold was released.')
+        : customerSideEffect('not_started', 'No item held', 'No item was held.');
+  return { payment, order, fulfillment, delivery, receipt, inventory };
+}
+
+function projectCustomerOutcome(task) {
+  const sideEffects = projectCustomerSideEffects(task);
+  const failureCode = task.failure?.code || null;
+  const adjustment = task.receipt?.adjustment || null;
+  let code = 'processing';
+  let tone = 'warning';
+  let title = 'Purchase in progress';
+  let message = 'NaviPay is checking the item and preparing the next update.';
+
+  if (adjustment?.status === 'failed') {
+    code = 'payment_update_failed';
+    tone = 'attention';
+    title = 'Payment update needs review';
+    message = `The original purchase remains in your receipt. The payment update did not complete. Net payment remains ${money(adjustment.netChargedMinor ?? task.financial?.netChargedMinor ?? 0)}.`;
+  } else if (adjustment?.status === 'refunded' || task.payment?.status === 'refunded') {
+    code = 'refund';
+    tone = 'warning';
+    title = 'Payment refunded';
+    message = `The original purchase remains in your receipt. The current payment was refunded. Net payment: ${money(adjustment?.netChargedMinor ?? task.financial?.netChargedMinor ?? 0)}.`;
+  } else if (adjustment?.status === 'reversed' || task.payment?.status === 'reversed') {
+    code = 'reversal';
+    tone = 'warning';
+    title = 'Payment reversed';
+    message = `The original purchase remains in your receipt. The current payment was reversed. Net payment: ${money(adjustment?.netChargedMinor ?? task.financial?.netChargedMinor ?? 0)}.`;
+  } else if (task.payment?.status === 'unknown' || task.state === 'reconciliation_required') {
+    code = 'payment_unknown';
+    tone = 'warning';
+    title = 'Payment status needs confirmation';
+    message = 'We do not yet know whether payment went through. No automatic retry will occur.';
+  } else if (task.state === 'completed' && task.delivery?.status === 'failed') {
+    code = 'delivery_failed';
+    tone = 'warning';
+    title = 'Delivery needs attention';
+    message = 'Your payment and order are confirmed, but delivery could not be completed.';
+  } else if (task.state === 'completed' && task.fulfillment?.status === 'failed') {
+    code = 'completed';
+    tone = 'warning';
+    title = 'Purchase confirmed, preparation needs attention';
+    message = 'Your payment and order are confirmed, but order preparation needs attention.';
+  } else if (task.state === 'completed' && task.delivery?.status === 'pending') {
+    code = 'delivery_pending';
+    tone = 'warning';
+    title = 'Order confirmed, delivery pending';
+    message = 'Your payment and order are confirmed. Delivery is still pending.';
+  } else if (task.state === 'completed' && task.delivery?.status === 'delivered') {
+    code = 'delivered';
+    tone = 'success';
+    title = 'Purchase delivered';
+    message = 'Your item was delivered. Your receipt is ready.';
+  } else if (task.state === 'completed') {
+    code = 'completed';
+    tone = 'success';
+    title = 'Purchase complete';
+    message = 'Your payment and order are confirmed. Your receipt is ready.';
+  } else if (task.payment?.status === 'compensated') {
+    code = 'payment_returned';
+    tone = 'warning';
+    title = 'Payment returned, no order confirmed';
+    message = 'The payment was returned because the order could not be confirmed. No confirmed order or receipt remains.';
+  } else if (failureCode && CUSTOMER_OUTCOME_BY_FAILURE[failureCode]) {
+    code = CUSTOMER_OUTCOME_BY_FAILURE[failureCode];
+    tone = ['ambiguity'].includes(code) ? 'warning' : 'attention';
+    const invalidCopy = failureCode === 'MISSING_PRODUCT_TYPE'
+      ? ['Name the product type', 'Name an item to buy, such as a Logitech mouse. Nothing was reserved or paid.']
+      : ['KYC_NOT_APPROVED', 'MERCHANT_CATEGORY_NOT_ALLOWED', 'POLICY_BLOCKED', 'RISK_BLOCKED'].includes(failureCode)
+        ? ['Purchase cannot proceed', 'This purchase cannot proceed in the local demo. Nothing was reserved or paid.']
+        : failureCode === 'QUOTE_EXPIRED'
+          ? ['Price check expired', 'The price check expired before payment. Nothing was reserved or paid.']
+          : ['Purchase could not start', 'The purchase request could not be used. Nothing was reserved or paid.'];
+    const copy = {
+      no_match: ['No matching item found', 'No matching local item was found. Nothing was reserved or paid.'],
+      ambiguity: ['Choose an item to continue', 'More than one item fits this request. Choose one before anything is reserved or paid.'],
+      over_budget: ['Item is over the purchase limit', 'The available item is over the purchase limit. Nothing was reserved or paid.'],
+      out_of_stock: ['Item is out of stock', 'The requested item is out of stock. Nothing was reserved or paid.'],
+      insufficient_funds: ['Not enough balance', 'The total is more than the available balance. Nothing was paid.'],
+      declined_payment: ['Payment was declined', 'Payment was declined. Nothing was paid, and no order was created.'],
+      invalid_request: invalidCopy
+    }[code] || ['Purchase not completed', 'The purchase was not completed. Nothing was reserved or paid.'];
+    [title, message] = copy;
+  } else if (task.state === 'awaiting_selection') {
+    code = 'ambiguity';
+    tone = 'warning';
+    title = 'Choose an item to continue';
+    message = 'More than one item fits this request. Choose one before anything is reserved or paid.';
+  } else if (task.state === 'failed') {
+    code = 'blocked';
+    tone = 'attention';
+    title = 'Purchase not completed';
+    message = 'NaviPay could not complete this purchase. Nothing was left half-paid.';
+  }
+
+  const sideEffectsSummary = ['payment', 'order', 'fulfillment', 'delivery', 'receipt'].map((stage) => ({
+    stage,
+    ...sideEffects[stage]
+  }));
+  return {
+    version: CUSTOMER_OUTCOME_VERSION,
+    code,
+    status: code,
+    tone,
+    title,
+    message,
+    purchaseEntered: sideEffects.payment.status !== 'not_started' || sideEffects.order.status !== 'not_started' || sideEffects.receipt.status !== 'not_started',
+    purchaseStatus: task.state === 'completed' ? 'completed' : task.state === 'reconciliation_required' ? 'payment_unknown' : code,
+    paymentStatus: sideEffects.payment.status,
+    orderStatus: sideEffects.order.status,
+    deliveryStatus: sideEffects.delivery.status,
+    sideEffects,
+    sideEffectsSummary,
+    adjustment: adjustment ? {
+      kind: adjustment.kind,
+      status: adjustment.status,
+      originalCaptureStatus: adjustment.originalCaptureStatus || null,
+      netChargedMinor: adjustment.netChargedMinor ?? null,
+      netRefundedMinor: adjustment.netRefundedMinor ?? 0,
+      currency: adjustment.currency || task.currency
+    } : null
+  };
+}
+
+function projectNextActions(task) {
+  const awaitingSelection = task.state === 'awaiting_selection';
+  const paymentUnknown = task.state === 'reconciliation_required' && task.payment?.status === 'unknown';
+  const hasReceipt = task.receipt?.status === 'confirmed';
+  const actions = [
+    {
+      version: CUSTOMER_ACTION_VERSION,
+      id: 'new_purchase',
+      label: 'New purchase',
+      enabled: true,
+      policyReason: 'A separate purchase can start without changing this purchase.'
+    },
+    {
+      version: CUSTOMER_ACTION_VERSION,
+      id: 'choose_item',
+      label: 'Choose an item',
+      enabled: awaitingSelection,
+      policyReason: awaitingSelection ? 'One item choice is needed before payment can start.' : 'No item choice is waiting for this purchase.'
+    },
+    {
+      version: CUSTOMER_ACTION_VERSION,
+      id: 'reconcile_payment',
+      label: 'Check payment status',
+      enabled: paymentUnknown,
+      policyReason: paymentUnknown ? 'Payment status needs confirmation. No automatic retry will occur.' : 'Payment status is not waiting for confirmation.'
+    },
+    {
+      version: CUSTOMER_ACTION_VERSION,
+      id: 'view_receipt',
+      label: 'View receipt',
+      enabled: hasReceipt,
+      policyReason: hasReceipt ? 'The confirmed receipt is available on this purchase.' : 'A receipt is available only after a confirmed order.'
+    },
+    {
+      version: CUSTOMER_ACTION_VERSION,
+      id: 'view_details',
+      label: 'View purchase details',
+      enabled: true,
+      policyReason: 'Purchase details are available below.'
+    }
+  ];
+  return actions;
+}
 
 function safeCandidate(candidate, { sourceAllowlist = [] } = {}) {
   if (!candidate) return null;
@@ -1573,6 +1819,8 @@ function projectTask(task, { operations = {}, auditEvents = [], walletBalanceMin
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     nextAction: task.automation?.nextAction || 'none',
+    customerOutcome: projectCustomerOutcome(task),
+    nextActions: projectNextActions(task),
     request: {
       raw: task.request?.raw || '',
       interpreted: task.request?.intent ? {
@@ -1835,16 +2083,20 @@ class NaviPaySandboxService {
     return { status: approved ? 'approved' : 'blocked', url: approved ? url : null };
   }
 
-  createTask({ request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator', replayOf = null, paymentMode = 'issuer_authorization' } = {}) {
+  createTask({ request, targetSite = undefined, targetUrl = undefined, scenario = 'happy', origin = 'operator', replayOf = null, paymentMode = 'issuer_authorization', allowInvalid = false } = {}) {
     if (!SANDBOX_SCENARIOS.has(scenario)) throw new SandboxDomainError(400, 'INVALID_SCENARIO', `Unknown sandbox scenario: ${scenario}.`);
     const targetSiteRecord = this._targetSiteRecord(targetSite === undefined ? targetUrl : targetSite);
     let raw;
     let intent;
+    let parseError = null;
     try {
       raw = typeof request === 'string' ? request.trim() : '';
       intent = parseRequest(raw);
     } catch (error) {
-      throw new SandboxDomainError(422, error.code || 'INVALID_PURCHASE_REQUEST', error.message);
+      if (!allowInvalid) throw new SandboxDomainError(422, error.code || 'INVALID_PURCHASE_REQUEST', error.message);
+      raw = typeof request === 'string' ? request.trim() : '';
+      parseError = { code: error.code || 'INVALID_PURCHASE_REQUEST', message: error.message || 'The purchase request could not be used.' };
+      intent = { normalized: '', brand: null, product: null, productCategory: null, quantity: 1, currency: CURRENCY, keywords: [], budgetMinor: null, budget: null };
     }
     const createdAt = now(this.clock);
     const requestedBudgetMinor = intent.budgetMinor;
@@ -1869,7 +2121,7 @@ class NaviPaySandboxService {
       customer: clone(DEMO_CUSTOMER),
       targetSite: targetSiteRecord,
       walletId: DEMO_WALLET.id,
-      request: { raw, intent },
+      request: { raw, intent, parseError },
       authorizationEnvelope: {
         version: 1,
         purpose: DEFAULT_PURCHASE_PURPOSE,
@@ -2690,6 +2942,12 @@ class NaviPaySandboxService {
       this._complete(taskId, 'intent', { status: 'interpreted', reference: stableReference('INTENT', task.id) }, stableReference('INTENT', task.id));
       this._recordStageAudit(taskId, 'intent', 'intent.interpreted', 'success', `Interpreted request as ${task.request.intent.productCategory || 'an unspecified product category'}.`, { operationId: opId, intent: task.request.intent });
       this._updateTask(taskId, (current) => { current.state = 'intent_interpreted'; });
+      if (task.request.parseError || task.scenario === 'invalid-request') {
+        const reason = 'Name an item to buy, such as a Logitech mouse. Nothing was reserved or paid.';
+        this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'INVALID_PURCHASE_REQUEST', reason, checks: { validIntent: { status: 'failed', reason } } });
+        this._fail(taskId, 'intent', 'INVALID_PURCHASE_REQUEST', reason);
+        return this._response(taskId, 422);
+      }
       if (task.request.intent.quantity !== 1) {
         this._recordAuthorizationDecision(taskId, { status: 'rejected', code: 'QUANTITY_UNSUPPORTED', reason: 'Authorization is limited to one unit per instruction.', checks: { validIntent: { status: 'passed', reason: 'The request was parsed.' }, quantityPolicy: { status: 'failed', reason: 'This authorization permits one unit only.' } } });
         this._fail(taskId, 'intent', 'QUANTITY_UNSUPPORTED', 'This local authorization permits one unit per purchase instruction.');
@@ -3233,7 +3491,7 @@ class NaviPaySandboxService {
     const key = `sandbox:start:${idempotencyKey}`;
     const previous = this._readIdempotency(key, fingerprint);
     if (previous?.response) return { ...clone(previous.response), replayed: true };
-    const task = previous?.taskId ? this.getTask(previous.taskId) : this.createTask(taskInput);
+    const task = previous?.taskId ? this.getTask(previous.taskId) : this.createTask({ ...taskInput, allowInvalid: true });
     if (!previous) this.store.transaction((data) => { data.idempotency[key] = { taskId: task.id, requestFingerprint: fingerprint, createdAt: now(this.clock), response: null }; });
     const result = this.runTask(task.id);
     const response = { ...result, statusCode: previous ? result.statusCode : (result.statusCode === 200 ? 201 : result.statusCode), replayed: false };
@@ -3522,6 +3780,10 @@ module.exports = {
   LocalMockKycProvider,
   LocalMockXsgdFundingProvider,
   TASK_PROJECTION_VERSION,
+  CUSTOMER_OUTCOME_VERSION,
+  CUSTOMER_ACTION_VERSION,
+  projectCustomerOutcome,
+  projectNextActions,
   projectAuditEvent,
   projectOperation,
   projectTask,

@@ -29,16 +29,17 @@ test('frontend contract keeps the calm purchase path and safe secondary surfaces
   assert.match(frontend, /data-resolution="declined"/);
   assert.match(frontend, /How this purchase was chosen/);
   assert.match(frontend, /Order and delivery/);
-  assert.match(frontend, /Technical overview/);
+  assert.match(frontend, /customerOutcome/);
+  assert.match(frontend, /nextActions/);
+  assert.match(frontend, /Purchase effects/);
   assert.doesNotMatch(frontend, /progressBands/);
 });
 
 test('frontend contract retains truthful failure language and accessible visual behavior', () => {
-  for (const marker of ['NO_LOCAL_MATCHES', 'OUT_OF_STOCK', 'SPENDING_CEILING_EXCEEDED', 'KYC_NOT_APPROVED', 'INSUFFICIENT_FUNDS', 'PAYMENT_DECLINED', 'reconciliation_required', 'DELIVERY_FAILED', 'FULFILLMENT_FAILED', 'refunded', 'reversed']) {
+  for (const marker of ['no_match', 'out_of_stock', 'over_budget', 'insufficient_funds', 'declined_payment', 'payment_unknown', 'delivery_failed', 'delivery_pending', 'refunded', 'reversed']) {
     assert.match(frontend, new RegExp(marker.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')));
   }
-  assert.match(frontend, /LOCAL SIMULATION ONLY/);
-  assert.match(frontend, /No retry will happen/);
+  assert.match(frontend, /No automatic retry will occur/);
   assert.match(stylesheet, /:focus-visible/);
   assert.match(stylesheet, /prefers-reduced-motion/);
   assert.match(stylesheet, /grid-template-columns: repeat\(3, 1fr\)/);
