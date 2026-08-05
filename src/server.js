@@ -393,9 +393,10 @@ function routeApi(service, req, res, url) {
 
 function staticFile(res, pathname) {
   const requested = pathname === '/' ? '/index.html' : ['/merchant-checkout/', '/checkout/'].includes(pathname) ? '/merchant-checkout.html' : pathname;
-  const filePath = path.resolve(publicDirectory, `.${requested}`);
-  if (!filePath.startsWith(`${publicDirectory}${path.sep}`)) return false;
-  const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
+  const isArchitectureDocument = requested === '/docs/architecture.md';
+  const filePath = isArchitectureDocument ? path.resolve(root, 'docs', 'architecture.md') : path.resolve(publicDirectory, `.${requested}`);
+  if (!isArchitectureDocument && !filePath.startsWith(`${publicDirectory}${path.sep}`)) return false;
+  const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.md': 'text/markdown; charset=utf-8' };
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return false;
   res.writeHead(200, {
     'Content-Type': contentTypes[path.extname(filePath)] || 'application/octet-stream',

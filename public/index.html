@@ -4,17 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#123530">
-  <meta name="description" content="NaviPay local simulated purchasing.">
-  <title>NaviPay - local purchase</title>
+  <meta name="description" content="NaviPay calm, local simulated purchasing.">
+  <title>NaviPay - local simulated purchase</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles-calm-overrides.css">
 </head>
 <body>
   <div class="app-shell">
-    <header class="topbar" aria-label="NaviPay header">
-      <a class="brand" href="/" aria-label="NaviPay home"><span class="brand-mark">N</span><strong>NaviPay</strong></a>
-      <div id="topbar-controls" class="topbar-right"><span class="mode-badge"><span class="mode-dot"></span>SIMULATED ONLY</span></div>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="NaviPay home"><span class="brand-mark">N</span><span><strong>NaviPay</strong><small>calm local shopping</small></span></a>
+      <div id="topbar-controls" class="topbar-controls"><span class="mode-badge mode-badge-dark"><span class="mode-dot"></span>Local demo</span></div>
     </header>
-    <main id="app" class="main-content"><section class="loading-state" aria-live="polite"><span class="spinner"></span> Loading sandbox…</section></main>
+    <main id="app" class="main-content"><section class="loading-state" aria-live="polite"><span class="spinner" aria-hidden="true"></span> Loading sandbox…</section></main>
   </div>
   <script src="/app.js" defer></script>
 </body>
