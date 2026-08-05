@@ -194,7 +194,7 @@ function routeSandboxApi(service, req, res, url) {
     return readBody(req).then((body) => {
       const input = body || {};
       if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_TASK_REQUEST', 'Task request must be a JSON object.');
-      const task = service.createTask({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', paymentMode: input.paymentMode || 'issuer_authorization' });
+      const task = service.createTask({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', paymentMode: input.paymentMode || 'issuer_authorization', agentMode: input.agentMode || undefined });
       return json(res, 201, { task, projection: service.getTaskProjection(task.id) });
     });
   }
@@ -203,7 +203,7 @@ function routeSandboxApi(service, req, res, url) {
       const input = body || {};
       if (typeof input !== 'object' || Array.isArray(input)) throw new SandboxDomainError(400, 'INVALID_PURCHASE_RUN', 'Purchase run input must be a JSON object.');
       const fallback = `sandbox-browser-${crypto.createHash('sha256').update(JSON.stringify({ request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy' })).digest('hex')}`;
-      const result = service.startPurchase({ idempotencyKey: idempotencyKey(req, fallback), request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', origin: input.origin || 'operator', paymentMode: input.paymentMode || 'issuer_authorization' });
+      const result = service.startPurchase({ idempotencyKey: idempotencyKey(req, fallback), request: input.request, targetSite: input.targetSite ?? input.targetUrl, scenario: input.scenario || 'happy', origin: input.origin || 'operator', paymentMode: input.paymentMode || 'issuer_authorization', agentMode: input.agentMode || undefined });
       return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
     });
   }
@@ -220,6 +220,24 @@ function routeSandboxApi(service, req, res, url) {
   }
   if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'projection' && method === 'GET') {
     return json(res, 200, { projection: service.getTaskProjection(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'reviewer' && method === 'GET') {
+    return json(res, 200, { reviewer: service.getReviewerProjection(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'events' && method === 'GET') {
+    return json(res, 200, { events: service.getAgentEvents(segments[2]) });
+  }
+  if (segments.length === 5 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'agent' && segments[4] === 'events' && method === 'GET') {
+    return json(res, 200, { events: service.getAgentEvents(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'checkpoint' && method === 'GET') {
+    return json(res, 200, { checkpoint: service.getAgentCheckpoint(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'runs' && segments[3] === 'reviewer' && method === 'GET') {
+    return json(res, 200, { reviewer: service.getReviewerProjectionByRun(segments[2]) });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'reviewer' && segments[2] === 'runs' && method === 'GET') {
+    return json(res, 200, { reviewer: service.getReviewerProjectionByRun(segments[3]) });
   }
   if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'audit' && method === 'GET') {
     return json(res, 200, { events: service.getAudit(segments[2]) });

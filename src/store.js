@@ -30,7 +30,10 @@ function emptyState() {
     fundingEvents: {},
     fundingCredits: {},
     kycProfiles: {},
-    kycEvents: {}
+    kycEvents: {},
+    agentRuns: {},
+    agentEvents: [],
+    agentCheckpoints: {}
   };
 }
 
@@ -84,6 +87,9 @@ function validateState(value, filePath = 'store') {
   ensureCollection(state, 'fundingCredits', 'object');
   ensureCollection(state, 'kycProfiles', 'object');
   ensureCollection(state, 'kycEvents', 'object');
+  ensureCollection(state, 'agentRuns', 'object');
+  ensureCollection(state, 'agentEvents', 'array');
+  ensureCollection(state, 'agentCheckpoints', 'object');
   return state;
 }
 

@@ -225,6 +225,9 @@
 .receipt-footer .next-action-choice { background: rgba(255, 241, 190, .55); }
 .receipt-footer .next-action-choice strong { color: var(--color-ink); }
 .receipt-footer .next-action-choice small { color: var(--color-muted); }
+.agent-disclosure { margin: -.45rem 0 .9rem; color: var(--color-muted); font-family: var(--font-mono); font-size: .61rem; line-height: 1.5; }
+.agent-disclosure strong { color: var(--color-ink); }
+.agent-stage-summary { display: block; margin-top: .15rem; }
 .terminal-disclosure { margin: .8rem 0 0; color: var(--color-muted); font-family: var(--font-mono); font-size: .61rem; }
 
 @media (max-width: 650px) {
