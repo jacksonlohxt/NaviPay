@@ -99,10 +99,17 @@ async function main() {
   assert.match(text, /Logitech MX Master 3S/);
   assert.match(text, /Harbor Supply/);
   assert.match(text, /XSGD 121\.50/);
-  assert.match(text, /Order confirmed/);
+  assert.match(text, /Confirmed/);
   assert.match(text, /Delivered/);
   assert.match(text, /Receipt/);
-  assert.match(text, /ORDER STATUS/i);
+  assert.doesNotMatch(text, /Your purchase/);
+  assert.doesNotMatch(text, /Purchase steps|What happens next|ORDER STATUS|View receipt/i);
+  assert.match(runChrome(['eval', '() => document.querySelectorAll(".receipt-status-row").length']), /1/);
+  assert.match(runChrome(['eval', '() => document.querySelector(".selection-details")?.open || false']), /false/);
+  runChrome(['eval', '() => { document.querySelector(".selection-details summary")?.click(); return "opened"; }']);
+  text = pageText();
+  assert.match(text, /Seeded catalog - deterministic local match/);
+  runChrome(['eval', '() => { const details = document.querySelector(".selection-details"); if (details) details.open = false; return "closed"; }']);
   assertDefaultSurface(text, 'success');
   assert.doesNotMatch(text, /More about this purchase\nEvidence, references, and activity\n[^]*Ledger transaction/);
   assert.doesNotMatch(text, /Remaining demo balance|Task-scoped demo balance/);
@@ -112,10 +119,12 @@ async function main() {
   text = pageText();
   assert.match(text, /Payment summary/);
   assert.match(text, /Payment status/i);
-  assert.match(text, /Card outcome/i);
-  assert.match(text, /Credentials are never shown/);
+  assert.match(text, /Payment method/i);
+  assert.match(text, /One-use payment method/i);
+  assert.match(text, /Safe reference/i);
   assert.match(text, /Task-scoped demo balance/i);
   assert.match(text, /This task snapshot only - never the global wallet balance/i);
+  assert.doesNotMatch(text, /Card outcome|Virtual card outcome|Refund payment|Reverse payment/);
   assert.doesNotMatch(text, /PAN|CVV|rawProviderPayload|secret/i);
   runChrome(['press', 'Escape']);
 
@@ -125,7 +134,7 @@ async function main() {
   assert.match(narrow, /narrow-ok/);
   text = pageText();
   assert.match(text, /Purchase confirmed/);
-  assert.match(text, /What happens next/);
+  assert.doesNotMatch(text, /Purchase steps|What happens next|Your purchase|View receipt/i);
   assert.doesNotMatch(text, /Remaining demo balance|Task-scoped demo balance/);
   runChrome(['eval', '() => { document.querySelector("[data-open-drawer]").click(); return "narrow-drawer-open"; }']);
   text = pageText();
@@ -138,9 +147,10 @@ async function main() {
   runChrome(['open', baseUrl]);
   text = pageText();
   assert.match(text, /No matching item found/);
-  assert.match(text, /PURCHASE EFFECTS/i);
+  assert.match(text, /No purchase record|Purchase details/);
   assert.match(text, /Nothing was reserved or paid/);
-  assert.doesNotMatch(text, /Purchase confirmed|Purchase complete/);
+  assert.match(text, /No receipt/);
+  assert.doesNotMatch(text, /Purchase confirmed|Purchase complete|Purchase steps|Your purchase/);
   assertDefaultSurface(text, 'no-match');
 
   // Unknown payment is automatically actionable and explicitly non-retryable.
@@ -154,6 +164,9 @@ async function main() {
   assert.match(text, /No receipt/);
   assert.match(text, /Payment was approved/);
   assert.match(text, /Payment was declined/);
+  assert.match(text, /Purchase steps/i);
+  assert.doesNotMatch(text, /Your purchase|What happened/);
+  assert.match(runChrome(['eval', '() => document.querySelectorAll(".advanced-details[open]").length']), /0/);
   assertDefaultSurface(text, 'unknown payment');
 
   // Delivery attention preserves payment, order, and receipt truth.
@@ -162,9 +175,11 @@ async function main() {
   runChrome(['open', baseUrl]);
   text = pageText();
   assert.match(text, /Delivery needs attention/);
-  assert.match(text, /Payment is confirmed/);
-  assert.match(text, /Order confirmed/);
+  assert.match(text, /Paid/);
+  assert.match(text, /Confirmed/);
   assert.match(text, /Purchase confirmed/);
+  assert.match(text, /Needs attention/);
+  assert.doesNotMatch(text, /Purchase steps|What happens next|Your purchase|View receipt/i);
   assertDefaultSurface(text, 'delivery failure');
 
   // No-purchase states expose the reason and explicit downstream side effects.
@@ -180,8 +195,10 @@ async function main() {
     runChrome(['open', baseUrl]);
     text = pageText();
     assert.match(text, expected, label);
+    assert.match(text, /No purchase record|Purchase details/i, label);
     assert.match(text, /No order|No confirmed order/, label);
     assert.match(text, /No receipt/, label);
+    assert.doesNotMatch(text, /Your purchase|What happens next|ORDER STATUS/, label);
     assertDefaultSurface(text, label);
   }
 
@@ -197,6 +214,7 @@ async function main() {
   text = pageText();
   assert.match(text, /Purchase delivered/);
   assert.doesNotMatch(text, /No automatic retry will occur/);
+  assert.doesNotMatch(text, /Purchase steps|Your purchase|View receipt/i);
   assertDefaultSurface(text, 'reconciled payment');
 
   // Refund and reversal keep the immutable original receipt visible next to the current update.
@@ -210,6 +228,7 @@ async function main() {
     assert.match(text, /immutable original purchase record/);
     assert.match(text, /CURRENT PAYMENT UPDATE/i);
     assert.match(text, /XSGD 0\.00/);
+    assert.doesNotMatch(text, /Purchase steps|Your purchase|View receipt/i);
     assertDefaultSurface(text, `${kind} payment`);
   }
 
