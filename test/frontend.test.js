@@ -7,20 +7,25 @@ const frontend = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'),
 const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
 const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 
-test('frontend contract keeps the calm three-stage purchase path and safe secondary surfaces', () => {
+test('frontend contract keeps the calm purchase path and safe secondary surfaces', () => {
   assert.match(index, /topbar-controls/);
+  assert.match(index, /styles-calm-overrides/);
   assert.match(frontend, /data-example/);
   assert.match(frontend, /stage-tracker/);
-  assert.match(frontend, /Discovery/);
-  assert.match(frontend, /Virtual card/);
-  assert.match(frontend, /Purchase/);
-  assert.match(frontend, /Primary success artifact/);
-  assert.match(frontend, /No task snapshot/);
+  assert.match(frontend, /Find item/);
+  assert.match(frontend, /Payment/);
+  assert.match(frontend, /Purchase confirmed/);
+  assert.match(frontend, /What happens next/);
+  assert.match(frontend, /Your receipt/);
+  assert.match(frontend, /Payment summary/);
   assert.match(frontend, /data-open-drawer/);
   assert.match(frontend, /data-payment-action="refund"/);
   assert.match(frontend, /data-payment-action="reverse"/);
   assert.match(frontend, /data-resolution="authorized"/);
   assert.match(frontend, /data-resolution="declined"/);
+  assert.match(frontend, /How this purchase was chosen/);
+  assert.match(frontend, /Order and delivery/);
+  assert.match(frontend, /Technical overview/);
   assert.doesNotMatch(frontend, /progressBands/);
 });
 
@@ -29,6 +34,7 @@ test('frontend contract retains truthful failure language and accessible visual 
     assert.match(frontend, new RegExp(marker.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')));
   }
   assert.match(frontend, /LOCAL SIMULATION ONLY/);
+  assert.match(frontend, /No retry will happen/);
   assert.match(stylesheet, /:focus-visible/);
   assert.match(stylesheet, /prefers-reduced-motion/);
   assert.match(stylesheet, /grid-template-columns: repeat\(3, 1fr\)/);
