@@ -19,6 +19,10 @@ test('frontend contract keeps the calm purchase path and safe secondary surfaces
   assert.match(frontend, /Your receipt/);
   assert.match(frontend, /Payment summary/);
   assert.match(frontend, /data-open-drawer/);
+  assert.doesNotMatch(frontend, /secondary-payment-summary/);
+  assert.doesNotMatch(frontend, /data-cell\('Remaining demo balance'/);
+  assert.match(frontend, /Task-scoped demo balance/);
+  assert.match(frontend, /never the global wallet balance/);
   assert.match(frontend, /data-payment-action="refund"/);
   assert.match(frontend, /data-payment-action="reverse"/);
   assert.match(frontend, /data-resolution="authorized"/);

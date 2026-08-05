@@ -99,6 +99,7 @@ async function main() {
   assert.match(text, /Technical overview/);
   assertDefaultSurface(text, 'success');
   assert.doesNotMatch(text, /More about this purchase\nEvidence, references, and activity\n[^]*Ledger transaction/);
+  assert.doesNotMatch(text, /Remaining demo balance|Task-scoped demo balance/);
 
   // The payment drawer is secondary, human-facing, safe, and keyboard dismissible.
   runChrome(['eval', '() => { window.fetch = window.__navipayFetch || window.fetch; document.querySelector("[data-open-drawer]").click(); return "drawer-open"; }']);
@@ -107,6 +108,8 @@ async function main() {
   assert.match(text, /Payment status/i);
   assert.match(text, /Card outcome/i);
   assert.match(text, /Credentials are never shown/);
+  assert.match(text, /Task-scoped demo balance/i);
+  assert.match(text, /This task snapshot only - never the global wallet balance/i);
   assert.doesNotMatch(text, /PAN|CVV|rawProviderPayload|secret/i);
   runChrome(['press', 'Escape']);
 
@@ -117,6 +120,11 @@ async function main() {
   text = pageText();
   assert.match(text, /Purchase confirmed/);
   assert.match(text, /What happens next/);
+  assert.doesNotMatch(text, /Remaining demo balance|Task-scoped demo balance/);
+  runChrome(['eval', '() => { document.querySelector("[data-open-drawer]").click(); return "narrow-drawer-open"; }']);
+  text = pageText();
+  assert.match(text, /Task-scoped demo balance/i);
+  runChrome(['press', 'Escape']);
 
   // No-match is a customer failure, not an empty technical dashboard.
   await resetAndOpen();
