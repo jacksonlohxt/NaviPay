@@ -1,19 +1,537 @@
 # NaviPay
 
-NaviPay is a local-only commerce sandbox with a truthful agentic contract. A user enters one purchase instruction such as `Find an Apple Magic Keyboard` and presses **Run purchase**. The default judgeable agent mode is a checked-in **recorded replay** containing model-shaped proposals with explicit offline provenance. The server policy engine and deterministic local adapters remain authoritative. **Deterministic fallback** is available with `agentMode: "deterministic_fallback"` and makes no model call. The frontend keeps the primary path to one instruction, a calm customer status view, a receipt, and a compact mode disclosure. The read-only reviewer route exposes Funding, Discovery, Issuance, and Execution evidence separately from the customer surface.
+> **Current stage: P0 local-only commerce sandbox and truthful agentic
+> contract**
+>
+> Baseline reviewed: default-branch commit `303ec52`, **Add truthful P0 agent
+> replay and reviewer proof**.
 
-Everything in this repository is simulated. No real money, wallet keys, merchant credentials, inventory, customer identity, or delivery network is used.
+NaviPay turns one plain-language purchase instruction into a bounded,
+inspectable local commerce run. It is a **local-only commerce sandbox and
+truthful agentic contract**, not a live payment, custody, KYC, merchant,
+marketplace, or delivery product.
 
-## Run locally
+Every wallet, catalog item, merchant, card, checkout, funding event, KYC
+decision, order, fulfillment update, delivery update, and model response in this
+repository is simulated or recorded locally. The demo is designed to make
+authority, evidence, recovery, and redaction visible without pretending that a
+local fixture proves a live provider event.
 
-Requirements: Node.js 20 or newer.
+## At a glance
+
+| Area                  | P0 reality                                          |
+| --------------------- | --------------------------------------------------- |
+| Primary interaction   | One instruction, one bounded local run              |
+| Commerce source       | Seeded catalog; optional read-only browser evidence |
+| Money                 | Fake XSGD wallet and local ledger                   |
+| Agent mode            | Recorded replay or deterministic fallback           |
+| Side-effect authority | Server policy and local adapters                    |
+| Customer artifact     | Customer outcome and receipt projection             |
+| Reviewer artifact     | Four-stage read-only evidence                       |
+| Persistence           | Version 2 local JSON store                          |
+| Runtime               | One Node.js process on `127.0.0.1`                  |
+
+## Product brief
+
+### Problem
+
+A purchase agent sits across several trust boundaries: interpreting an
+instruction, finding an item, checking a quote, reserving stock, checking
+funding and KYC eligibility, authorizing payment, creating an order, and
+reporting what happened. A plausible-looking success message is not enough.
+Reviewers and contributors need to see which system made each decision, what
+evidence is local, what was persisted, and how unknown or partial outcomes are
+handled.
+
+NaviPay provides a small, repeatable vertical slice for evaluating those
+boundaries. The local implementation favors truthful state over an impressive
+but unverifiable automation story.
+
+### Target demo and users
+
+- **Captain, organizer, or reviewer:** run one purchase, inspect the customer
+  result, then open the reviewer projection to verify provenance, policy, tool
+  facts, checkpoints, and safe event identities.
+- **Contributor or design and engineering team:** use the seeded fixtures and
+  deterministic scenarios to understand the contracts, build UI or adapter
+  changes, and prove that a failure did not become a false success.
+- **Simulated customer:** enter one natural instruction, see a calm status and
+  receipt, and take only the next action the server exposes.
+
+### Goals
+
+1. Demonstrate one bounded purchase from instruction to receipt using local,
+   deterministic seams.
+2. Keep the server authoritative for interpretation, quote, budget, inventory,
+   authorization, payment, order, fulfillment, delivery, and projections.
+3. Make recorded agent provenance and the boundary between advisory proposals
+   and authorized side effects reviewable.
+4. Preserve truthful task state through reload, idempotent replay, unknown
+   payment, compensation, refund, reversal, and delivery failure.
+5. Keep browser and reviewer responses useful while excluding credentials, raw
+   provider payloads, raw page content, and unsafe model data.
+
+### Non-goals
+
+NaviPay is not currently:
+
+- a live wallet, bank, card issuer, payment processor, custody service, or
+  settlement system;
+- a KYC, AML, sanctions, identity, or customer verification service;
+- a marketplace, merchant network, production inventory system, or live order
+  platform;
+- a live XSGD or blockchain integration;
+- a live merchant checkout, Amazon integration, external carrier, or external
+  delivery network;
+- a hosted-model product or unrestricted browser automation system;
+- a production-concurrency or operational-reliability claim.
+
+## Current scope and deliberate boundary
+
+### P0: implemented now
+
+P0 is the current judgeable stage:
+
+- One instruction, one purchase purpose, XSGD currency, and a hard local task
+  ceiling of XSGD 1,000.
+- Natural request parsing with hard brand, product, category, quantity, and
+  budget constraints. The purchase policy authorizes exactly one unit.
+- Seeded local catalog coverage for keyboards, mice, and earphones, with local
+  merchants, quote arithmetic, stock, tax, shipping, and deterministic ranking.
+- Quote and cart snapshots with expiry, line details, budget status, and a
+  stable snapshot hash.
+- Inventory reservation before any payment attempt, with lease, commit, release,
+  expiry, and idempotent references.
+- A credential-free mock KYC and mock XSGD funding boundary. A normal first
+  concrete purchase may bootstrap a simulated local KYC approval for the demo;
+  explicit pending and rejected fixtures remain hard stops.
+- A scoped local disposable-card lifecycle and a fresh local checkout worker.
+  The card capability is process-local and the default issuer capture performs
+  the single fake-wallet debit.
+- Balanced local wallet ledger legs, merchant-credit confirmation, idempotent
+  order creation, independent fulfillment and delivery states, and a persisted
+  receipt.
+- A versioned safe customer projection with `customerOutcome`, bounded
+  `nextActions`, task-owned financial snapshots, a redacted timeline, and a safe
+  receipt adjustment.
+- A P0 agent contract with a checked-in recorded replay and deterministic
+  fallback, server policy evaluation, normalized events, checkpoints, and
+  read-only reviewer evidence.
+- Optional bounded Playwright discovery that can provide read-only
+  recommendations only after server allowlisting and catalog matching; the
+  shipped demonstration uses a local replay site.
+
+### P1 and P2: future extension boundaries
+
+These labels describe extension boundaries, not partially enabled providers:
+
+- **P1 provider-backed boundaries:** live XSGD funding, real KYC, hosted models,
+  real card issuance, and custody. Each requires an approved provider contract,
+  exact status and webhook semantics, credential handling, reconciliation rules,
+  and deployment credentials. No local mock result is evidence of any of these.
+- **P2 external commerce and operations:** live merchant checkout, Amazon, live
+  inventory and order APIs, and external delivery. Each requires an approved
+  official or partner contract, terms-compliant capabilities, credentials,
+  provider-specific failure behavior, and a separate adapter. Amazon is not
+  scraped in this repository.
+
+Until those contracts are approved and implemented, local adapters remain the
+default and the product must continue to disclose simulation.
+
+## Primary user journey
+
+The normal path is `POST /api/purchases/run`. The browser can request this
+operation, but it cannot choose a price, create a card credential, authorize a
+side effect, or write lifecycle state. The server validates and persists every
+transition.
+
+1. **Instruction and authorization envelope.** The server accepts bounded plain
+   text, parses product type, brand, quantity, currency, keywords, and optional
+   budget, then stores the original instruction alongside a versioned
+   authorization envelope. Unsupported currency, malformed quantity, unsafe
+   requests, and missing product type stop before payment; any temporary
+   reservation is released.
+2. **Discovery.** `LocalDiscoveryAdapter` ranks the seeded catalog by hard
+   constraints, category, brand, keywords, stock, and stable catalog order. A
+   genuine tie pauses for an item choice. An exact brand or product request is
+   never silently substituted with another item.
+3. **Quote lock.** The server selects the clear eligible candidate and locks the
+   merchant, item, variant, quantity, price, shipping, tax, total, currency,
+   quote ID, cart ID, expiry, and snapshot hash. The browser never supplies the
+   authoritative total.
+4. **Inventory.** The server reserves one unit with a lease before payment. Out
+   of stock, over budget, stale quote, and selection failures stop without an
+   unconfirmed payment.
+5. **Funding and KYC boundary.** The purchase checks the seeded fake wallet
+   through the local funding adapter and checks the local mock KYC gate
+   immediately before authorization. The separate funding routes can create and
+   simulate mock deposit intents after explicit local KYC approval. Neither path
+   proves identity, custody, a blockchain transaction, or live XSGD.
+6. **Server authorization.** The policy engine evaluates the fresh exact quote,
+   hard constraints, budget, inventory, KYC status, fake-wallet balance,
+   merchant scope, category, quantity, and local risk checks. Only this server
+   decision can approve the downstream instrument and execution steps.
+7. **Scoped local issuer.** On approval, the local issuer creates a one-use
+   instrument scoped to the selected local merchant, domain, exact amount, XSGD,
+   category code, expiry, and one successful capture. The credential is held in
+   an isolated process-local capability, not in a task, audit event, projection,
+   log, fixture, or browser response.
+8. **Checkout simulation.** A fresh per-task local checkout worker submits the
+   locked product, cart, delivery fixture, and isolated card capability to the
+   local merchant gateway. This is a deterministic local checkout simulation,
+   not a real browser checkout or external merchant.
+9. **Authorization and capture.** The local issuer checks merchant, amount,
+   currency, category, expiry, and one-use scope. A successful capture performs
+   one fake-wallet debit. A decline is terminal. An unknown result becomes a
+   durable reconciliation state and is never blindly retried.
+10. **Ledger and merchant credit.** A successful capture writes one balanced
+    pair of local ledger legs: wallet debit and merchant credit. Merchant-credit
+    confirmation verifies the existing ledger credit and is not a second debit.
+11. **Order, fulfillment, and delivery.** An idempotent order is created only
+    after confirmed payment and committed inventory. Fulfillment and delivery
+    are independent statuses. A delivery failure does not rewrite a confirmed
+    payment or order.
+12. **Receipt and customer outcome.** The server persists the receipt and a
+    plain-language outcome. The receipt is the primary success artifact and
+    includes immutable capture facts, price, payment, order, preparation,
+    delivery, and safe references. A later refund or reversal appears as a
+    current adjustment without rewriting the original capture snapshot.
+13. **Reviewer evidence.** The reviewer route separates the run into Funding,
+    Discovery, Issuance, and Execution. Funding says local mock evidence only.
+    Execution says local checkout simulation only. Neither label is a provider
+    claim.
+
+### What the browser can and cannot do
+
+`public/app.js` renders server-owned projections and submits bounded requests.
+It may ask the server to start a purchase, select a candidate, reconcile an
+unknown payment, or request a local refund or reversal. It cannot set a quote or
+balance, mutate a task directly, issue or read a credential, approve policy,
+invoke an adapter, or turn browser discovery into checkout authority. The server
+validates every requested transition, enforces idempotency, and returns redacted
+projections.
+
+## Agent mode and reviewer proof
+
+The default P0 mode is `recorded_replay`.
+[`fixtures/agent-replay-v1.json`](fixtures/agent-replay-v1.json) is a versioned
+response bundle validated against its embedded SHA-256 signature. It contains
+model-shaped typed proposals for bounded local plans, not a live model response.
+`deterministic_fallback` is a network-free, credential-free alternative selected
+with `agentMode: "deterministic_fallback"` or
+`NAVIPAY_AGENT_MODE=deterministic_fallback`.
+
+Both modes are **advisory**. A proposal can contain typed intents and
+allowlisted tool proposals, but it cannot authorize inventory, card issuance,
+checkout, payment, order, or receipt side effects.
+[`src/agentic.js`](src/agentic.js) validates the proposal and records the policy
+decision. The business authorization in [`src/sandbox.js`](src/sandbox.js) and
+the local adapters are authoritative.
+
+The four reviewer stages are:
+
+- **Funding:** local mock funding observation and an explicit no-live-XSGD
+  disclosure.
+- **Discovery:** bounded candidate, quote, ranking, and snapshot evidence.
+- **Issuance:** server-approved one-use local instrument scope and safe card
+  status.
+- **Execution:** local checkout, capture, ledger, merchant credit, order,
+  fulfillment, delivery, and receipt facts.
+
+The customer projection exposes only a compact mode disclosure and stage
+statuses. The read-only reviewer projection exposes the typed proposal, safe
+context summary, server policy decision, allowlisted tool registry, safe
+observations, safe tool facts, evidence references, hashes, budgets, retries,
+checkpoints, stage transitions, final outcome, and event identities. It does not
+expose the raw prompt, raw page text, provider payload, credential, or mutation
+control. See [`src/agent-contract.js`](src/agent-contract.js),
+[`src/model-gateway.js`](src/model-gateway.js), and
+[`src/agentic.js`](src/agentic.js) for the exact contracts.
+
+## Architecture overview
+
+The detailed lifecycle, data model, failure semantics, and extension rules are
+in [`docs/architecture.md`](docs/architecture.md). This diagram is the
+high-level entry point.
+
+```mermaid
+flowchart LR
+  B["Browser<br/>public/app.js"]
+  H["HTTP boundary<br/>src/server.js"]
+  S["Authoritative service<br/>src/sandbox.js"]
+  A["Agent contract and policy<br/>src/agent-contract.js<br/>src/agentic.js"]
+  M["Advisory gateway<br/>src/model-gateway.js"]
+  R["Recorded replay fixture<br/>fixtures/agent-replay-v1.json"]
+  F["Funding seam<br/>src/funding.js"]
+  K["KYC seam<br/>src/kyc.js"]
+  I["Local issuer<br/>src/issuer.js"]
+  W["Checkout capability<br/>src/checkout-worker.js"]
+  L["Local catalog, wallet, ledger,<br/>inventory, order, fulfillment, delivery"]
+  P["Safe customer and reviewer projections"]
+  D[(".data/navipay.json<br/>src/store.js")]
+
+  B -->|instruction and bounded actions| H
+  H --> S
+  S -->|typed proposal only| A
+  A --> M
+  M --> R
+  A -->|policy decision| S
+  S --> F
+  S --> K
+  S --> I
+  I --> W
+  W --> L
+  S --> L
+  S -->|persist state, operations, idempotency, audit| D
+  D --> S
+  S --> P
+  P --> H
+  H -->|redacted reads| B
+```
+
+### Module map
+
+- [`src/server.js`](src/server.js) is the single-host entrypoint. It owns HTTP
+  routing, request-size and error handling, local simulation authorization, and
+  safe JSON responses.
+- [`src/sandbox.js`](src/sandbox.js) owns the seeded catalog, orchestration,
+  authorization envelope and decision, local adapters, lifecycle transitions,
+  financial truth, receipt, customer projection, and reviewer projection
+  assembly.
+- [`src/store.js`](src/store.js) owns the version 2 in-memory and JSON
+  persistence boundary, migration, validation, and atomic restricted-file
+  writes.
+- [`src/agentic.js`](src/agentic.js) owns safe context, observations,
+  allowlisted tool proposals, policy decisions, stage transitions, append-only
+  agent events, checkpoints, and reviewer projection helpers.
+- [`src/model-gateway.js`](src/model-gateway.js) owns the provider-neutral P0
+  gateway and the recorded replay and deterministic fallback implementations.
+- [`src/issuer.js`](src/issuer.js) owns the local one-use instrument lifecycle.
+  [`src/checkout-worker.js`](src/checkout-worker.js) owns the fresh bounded
+  local checkout capability and cleanup metadata.
+- [`src/funding.js`](src/funding.js) and [`src/kyc.js`](src/kyc.js) define
+  replaceable provider-neutral seams backed by explicit local mock
+  implementations.
+- [`public/app.js`](public/app.js) is the customer UI. It consumes projections,
+  keeps secondary evidence collapsed, and does not make business or payment
+  decisions.
+
+## Persistence and data truth
+
+### State and snapshots
+
+The local store is version 2 and migrates version 1 state on load. It persists
+tasks, progress, operations, idempotency responses, wallet transfers,
+double-entry ledger legs, merchant credits, inventory reservations, orders,
+fulfillment and delivery records, issuer metadata, checkout sessions and webhook
+fixtures, refunds, funding intents and events, KYC state, agent runs, normalized
+agent events, and checkpoints.
+
+`JsonStore` writes to a restricted directory and file, writes through a
+restricted temporary file, calls `fsync`, and atomically renames the result.
+This supports local reload and recovery. It is still a single-process JSON store
+and does not claim transactional database concurrency or production durability.
+
+Each task owns its financial snapshot. The projection records
+`balanceBeforeMinor`, `balanceAfterPaymentMinor`, `finalBalanceMinor`,
+`netChargedMinor`, `netRefundedMinor`, compensation, and financial outcome when
+known. A task with no payment snapshot does not inherit the current global
+wallet balance. The global wallet endpoint is separate evidence.
+
+Locked quotes persist quote ID, cart ID, line snapshot, exact arithmetic,
+expiry, budget status, and snapshot hash. Inventory reservation and order
+confirmation validate that snapshot, so a later or browser-supplied amount
+cannot widen the purchase.
+
+### Projections and redaction
+
+The legacy `task` shape remains in responses for compatibility. The versioned
+`projection` is the browser contract and is rebuilt from task-owned facts by
+`src/sandbox.js`. It contains interpreted request data, safe candidate evidence,
+quote and reservation facts, financial snapshots, safe payment and card
+lifecycle, order, fulfillment, delivery, receipt, operations, a redacted
+timeline, `customerOutcome`, bounded `nextActions`, and a compact agent
+disclosure.
+
+Reviewer routes use a separate projection. Normalized agent event envelopes
+retain sequence, actor, stage, idempotency identity, payload hash, and previous
+hash. `GET /api/tasks/:id/events` returns event identities without event
+payloads. Checkpoints make restart state inspectable. `rebuildProjections` and
+the agent event log rebuild customer and reviewer read models without exposing
+raw model or provider content.
+
+### Idempotency, reconciliation, and compensation
+
+- Purchase and action routes accept `Idempotency-Key`. The key and input
+  fingerprint are persisted. Replaying the same key returns the stored response;
+  reusing a key with different input is rejected.
+- Adapter operations use stable operation IDs and references. Inventory leases,
+  wallet transfers, captures, orders, funding credits, webhook events, refunds,
+  and reversals are looked up before new side effects.
+- An unknown payment keeps the reservation, moves the task to reconciliation,
+  and blocks automatic retry. `POST /api/tasks/:id/payment/reconcile` resolves
+  the existing issuer result as `authorized` or `declined` without replaying
+  checkout or creating a second transfer.
+- Merchant-credit, order, and inventory-commit failure after capture uses a
+  compensating local ledger transfer and releases stock where possible. If
+  compensation itself fails, the task stays truthfully charged and records the
+  failed compensation instead of claiming that money was returned.
+- A refund or reversal is one idempotent local post-capture adjustment. It
+  updates current payment and net amounts, while the original receipt capture
+  snapshot stays immutable.
+
+## Failure semantics
+
+The service includes deterministic scenario fixtures used by tests and API
+demonstrations. Representative outcomes include no match, missing product type,
+unsupported quantity, ambiguity, exact out of stock, over budget, stale quote,
+pending or rejected KYC, insufficient funding, policy block, payment decline,
+unknown payment, wrong merchant, amount overage, expired card, browser crash,
+merchant-credit failure, order or inventory commit failure, fulfillment failure,
+and delivery failure.
+
+The important customer truths are:
+
+- **Before capture:** invalid request, no match, ambiguity, over budget, stale
+  quote, out of stock, KYC or policy block, insufficient funds, and decline stop
+  before an unconfirmed payment. Reservations are released when one exists. No
+  confirmed order or receipt is invented.
+- **Unknown payment:** the task says that payment status needs confirmation. No
+  automatic retry occurs. An authorized reconciliation continues from the
+  persisted adapter truth; a declined reconciliation retires the local
+  instrument and releases inventory.
+- **Fulfillment or delivery failure:** confirmed payment and order remain
+  confirmed. The independent preparation or delivery status shows attention is
+  needed, and the receipt remains available.
+- **Refund or reversal:** the original purchase remains visible as an immutable
+  capture record next to a current payment adjustment. Commerce history is not
+  rewritten.
+- **Reload and checkpoint recovery:** persisted task state can resume a safe
+  local run. A disposable credential is not persisted. If a process-local
+  capability cannot be safely recreated from its stored scope, the run stops
+  rather than reusing an unverified credential.
+
+## API and contract index
+
+The route handlers in [`src/server.js`](src/server.js) and projection builders
+in [`src/sandbox.js`](src/sandbox.js) are authoritative for exact schemas,
+status codes, and errors. Send `Idempotency-Key` on every mutating request.
+
+| Surface            | Endpoint                                |
+| ------------------ | --------------------------------------- |
+| Primary purchase   | `POST /api/purchases/run`               |
+| Resume selection   | `POST /api/tasks/:id/run`               |
+| Task projection    | `GET /api/tasks/:id/projection`         |
+| Reviewer proof     | `GET /api/tasks/:id/reviewer`           |
+| Reviewer by run    | `GET /api/runs/:runId/reviewer`         |
+| Receipt            | `GET /api/tasks/:id/receipt`            |
+| Payment reconcile  | `POST /api/tasks/:id/payment/reconcile` |
+| Payment refund     | `POST /api/tasks/:id/payment/refund`    |
+| Payment reverse    | `POST /api/tasks/:id/payment/reverse`   |
+| Funding and KYC    | `/api/funding` and `/api/funding/kyc`   |
+| Catalog and wallet | `/api/catalog` and `/api/wallet`        |
+| Reset              | `POST /api/reset`                       |
+| Optional discovery | `/api/discovery` and `targetSite`       |
+
+Contract notes:
+
+- The primary run accepts `{ "request": "..." }` plus optional `targetSite`,
+  `scenario`, `paymentMode`, and `agentMode`. Resume accepts a `candidateId`.
+- `GET /api/tasks`, `GET /api/tasks/:id`, and `GET /api/tasks/:id/audit` provide
+  history, the compatibility task shape, and safe audit events.
+  `GET /api/tasks/:id/events` and `GET /api/tasks/:id/checkpoint` provide safe
+  agent identities and checkpoint state.
+- Reconcile accepts `{"resolution":"authorized"}` or
+  `{"resolution":"declined"}`. Refund and reverse are empty-body local actions.
+- Funding includes `POST /api/funding/intents`, `GET /api/funding/intents/:id`,
+  `POST /api/funding/intents/:id/simulate`, `POST /api/funding/webhooks`, and
+  `POST /api/funding/reconcile`. KYC has matching `/api/funding/kyc/simulate`,
+  `/webhooks`, and `/reconcile` routes. Simulation requires
+  `X-NaviPay-Local-Simulation: true`; provider routes also require the
+  configured provider identity and appropriate server-side authorization.
+- `targetSite` is optional on the purchase run. The server validates its URL and
+  allowlist before the bounded browser worker can read it. The worker never gets
+  payment or checkout authority.
+
+Funding examples use the explicit local simulation authorization header and are
+deliberately not live-provider instructions:
+
+```sh
+# Inspect the local-only funding and KYC projection
+curl -sS http://127.0.0.1:3000/api/funding
+
+# Approve the mock KYC gate for local testing only
+curl -sS -X POST http://127.0.0.1:3000/api/funding/kyc/simulate \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: demo-kyc-approve' \
+  -H 'X-NaviPay-Local-Simulation: true' \
+  -d '{"action":"approve"}'
+
+# Create deterministic mock deposit instructions
+curl -sS -X POST http://127.0.0.1:3000/api/funding/intents \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: demo-funding-create' \
+  -d '{"amount":"25.00"}'
+```
+
+The mock funding flow uses a `mock://`-style local instruction and makes no
+network call. It does not create a blockchain transaction or accept a real
+deposit. Do not treat its reference, network label, or confirmation evidence as
+provider evidence.
+
+## Local setup and validation
+
+### Requirements
+
+- Node.js 20 or newer
+- npm
+- Python 3 only for the optional local browser replay server
+- `chrome-devtools-axi` for `npm run test:ui`
+
+### Run the product
 
 ```sh
 npm install
 npm start
 ```
 
-Open <http://127.0.0.1:3000>. The app starts with an empty purchase history and a seeded fake wallet. Enter one of the example requests and run it. State is persisted in `.data/navipay.json`; set `NAVIPAY_DATA_FILE` to use another local file.
+Open <http://127.0.0.1:3000>. Use an example request such as
+`buy a Logitech mouse` or `Find an Apple Magic Keyboard`. The default path uses
+the seeded catalog and does not require Playwright. After reset, the fake wallet
+starts at XSGD 500.00 and the mock KYC profile is pending until the purchase
+bootstrap or an explicit local simulation changes it.
+
+The same primary contract can be exercised without the browser:
+
+```sh
+curl -sS -X POST http://127.0.0.1:3000/api/purchases/run \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: demo-keyboard-purchase' \
+  -d '{"request":"Find an Apple Magic Keyboard"}'
+```
+
+Runtime state is written to `.data/navipay.json`, which is ignored by Git. For a
+clean, isolated local run, either reset the sandbox:
+
+```sh
+curl -sS -X POST http://127.0.0.1:3000/api/reset
+```
+
+or use a separate file:
+
+```sh
+mkdir -p .data
+NAVIPAY_DATA_FILE="$PWD/.data/navipay-review.json" npm start
+```
+
+Do not commit local state or credentials. If a future provider is configured,
+inject its server-side secret through deployment configuration such as
+`NAVIPAY_FUNDING_WEBHOOK_SECRET` or `NAVIPAY_KYC_WEBHOOK_SECRET`; never put it
+in browser code, fixtures, task projections, or tests.
+
+### Validation commands
+
+From the repository root:
 
 ```sh
 npm test
@@ -21,177 +539,67 @@ npm run check
 npm run test:ui
 ```
 
-For the organizer, reviewer, and developer view of the lifecycle, authority boundaries, projection model, failure semantics, and extension points, see [docs/architecture.md](docs/architecture.md).
+`npm test` covers lifecycle, authorization, agent contracts, reviewer proof,
+discovery, funding and KYC, issuer and checkout, ledger, persistence, recovery,
+truthfulness, customer outcomes, HTTP, and frontend contracts. `npm run check`
+validates the current JavaScript entrypoints. `npm run test:ui` runs the Chrome
+DevTools UI contract across idle, running, success, drawer, narrow, no-match,
+delivery-failure, unknown-payment, reconciliation, refund, and reversal states.
+The UI runner starts a temporary server and removes its temporary data file.
 
-The public repository contains the application source, tests, and deterministic local HTML fixtures. Runtime state is deliberately excluded: `.data/` is ignored and contains only local wallet, inventory, and task state. Use `NAVIPAY_DATA_FILE` for an isolated local state file, and inject any future provider secret through server-side deployment configuration rather than committing it.
+### Optional Playwright browser-evidence demonstration
 
-## Product walkthrough
-
-1. Enter a purchase instruction such as `I want a keyboard` and press **Run purchase** once. NaviPay starts with the seeded local catalog and local merchant gateway. Example requests are semantic buttons, and optional browser discovery is available in a clearly labelled collapsed section with no checkout authority.
-2. NaviPay applies bounded budget parsing and hard brand/category constraints, then ranks valid in-stock candidates with a deterministic policy. A clear winner within the XSGD 1,000 task ceiling is selected automatically. An exact out-of-stock brand is never silently replaced by another brand.
-3. NaviPay cross-checks browser identity and quote amounts against the authoritative seeded local catalog, then automatically reserves inventory, verifies the fake wallet, transfers fake funds, confirms merchant credit, creates the order, fulfills it, delivers it, issues the receipt, and records the audit trail. The reviewer projection groups those internal steps into Funding, Discovery, Issuance, and Execution. The Funding evidence is explicitly local mock evidence, and Execution explicitly identifies the checkout as a local simulation rather than real browser checkout.
-4. See the receipt first, with the item, merchant, exact price breakdown, payment state, order, preparation, delivery, safe references, issue time, and one concise local-demo disclosure. The header Payment summary contains only safe task payment facts and the task-scoped balance. A task with no financial snapshot shows no invented balance and never falls back to the current global wallet.
-5. NaviPay pauses only for a genuine tie or ambiguity, malformed/stale/blocked discovery, no available or over-cap item, insufficient fake funds, an unknown payment result, or another safety exception. The server-owned outcome states what happened, what did not happen, and the bounded next action. **More about this purchase** keeps selection, payment, order, delivery, and activity evidence collapsed until opened. Failure states never render a success-looking receipt.
-
-The customer and address are deliberately labeled simulated and are stored as replaceable fixtures in `src/sandbox.js`. The fake wallet is named **NaviPay Demo Wallet**, owned by **Demo Customer**, and starts with a seeded XSGD balance of XSGD 500.00. Issuer authorization and capture are the only default purchase debit path. The fake issuer is funded by that wallet, and the direct wallet transfer path exists only for explicit legacy test mode.
-
-## Competition issuance and checkout demonstration
-
-This is the exact local-only demonstration for the approved issuance and execution milestones. Every card, gateway, merchant response, webhook, order, and delivery result below is simulated. No PAN, CVV, merchant credential, or real payment network is used. Airwallex is reserved for a future Singapore/SGD pilot and StraitsX for future exact-XSGD diligence; neither is a current dependency.
-
-1. Start NaviPay with `npm start`, open <http://127.0.0.1:3000>, and leave the target site blank so the seeded merchant catalog is the authoritative local source.
-2. Enter `Find an Apple Magic Keyboard` and press **Run purchase**. NaviPay reserves one unit before payment, verifies the seeded fake wallet, issues a disposable one-use card scoped to Orchard Electronics, XSGD 171.72, and MCC 5732, and starts a fresh bounded checkout worker profile.
-3. Observe the three stages, then open **Virtual card** for the safe masked reference, checkout submission, issuer authorization and capture references, and **Card retired** status. The confirmed order, delivery, and final receipt are shown on the primary path. The card credential is injected only inside the isolated checkout capability and never appears in the task, projection, audit, worker record, log, or browser UI.
-4. Repeat the same flow through the API to inspect the safe contract:
-
-   ```sh
-   curl -sS -X POST http://127.0.0.1:3000/api/purchases/run \
-     -H 'content-type: application/json' -H 'Idempotency-Key: competition-success' \
-     -d '{"request":"Find an Apple Magic Keyboard"}'
-   ```
-
-   The response contains only card status and masked reference, issuer authorization and capture references, order, delivery, receipt, redacted evidence, and the persisted lifecycle. It contains no card credential or raw merchant payload.
-5. Use API scenario fixtures to replay safe execution outcomes: `decline`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `browser-crash`, and `duplicate`. For `unknown` or `timeout`, call `POST /api/tasks/:id/payment/reconcile` with `{"resolution":"authorized"}` or `{"resolution":"declined"}`. NaviPay never retries an unknown capture. For a confirmed task, `POST /api/tasks/:id/payment/refund` and `/payment/reverse` exercise the simulated refund and reversal webhook fixtures.
-6. Open <http://127.0.0.1:3000/merchant-checkout/> to inspect the purpose-built local merchant checkout page. Its product, cart, delivery, and card fields are a fixture only. Discovery remains read-only and cannot invoke this checkout worker or gateway.
-
-The local checkout worker records only a fresh profile identifier, approved local origin, bounded action metadata, and cleanup status in persisted state. The issuer lifecycle persists issue, status, authorize, capture, reconcile, retire, revoke, expiry, scope, stable operation IDs, and idempotency records while keeping the disposable credential in an isolated in-memory capability.
-
-## Local fake environments
-
-- **Merchant catalog**: `CATALOG` in `src/sandbox.js` contains merchant IDs, local merchant domains, SKUs, variant IDs, prices, tax and shipping, quantities, and product categories for keyboards, mice, and earphones. It remains the reliable default and test oracle.
-- **Inventory**: `LocalInventoryAdapter` supports one-unit stock leases with expiry, reserve, commit, release, out-of-stock handling, and idempotent operation references. Reservation happens before any wallet debit.
-- **Wallet**: `LocalWalletTransferAdapter` operates on the seeded wallet and writes an atomic double-entry ledger. A transfer has a wallet debit and merchant credit leg, a stable operation reference, replay lookup, insufficient-funds handling, decline handling, unknown-result handling, and compensation support. The wallet balance is the spendable source. It is not inferred from chain evidence.
-- **Issuer and checkout**: `src/issuer.js` persists the fake issuer card lifecycle and `src/checkout-worker.js` creates a fresh bounded profile per task. `LocalMerchantCheckoutAdapter` submits product, cart, delivery, and isolated card data to the local gateway, which authorizes and captures through the issuer. The issuer capture performs the single fake-wallet debit.
-- **Merchant credit**: `LocalMerchantCreditAdapter` confirms that the ledger credit reached the selected merchant before order creation. It is bookkeeping after issuer capture, not a second debit.
-- **Order**: `LocalOrderAdapter` creates an idempotent order only after confirmed payment and committed inventory.
-- **Fulfillment and delivery**: `LocalFulfillmentAdapter` and `LocalDeliveryAdapter` write independent statuses. A delivery failure leaves the confirmed payment, merchant credit, order, and receipt confirmed.
-
-All adapter responses are normalized server-side. The browser receives status, references, and safe evidence only, never raw provider payloads or credentials.
-
-## Competition-style local browser discovery test
-
-The default is still the seeded catalog and does not require Playwright. To run the competition-style replay merchant and bounded browser worker:
+This is a local replay of read-only discovery. It is not live merchant browsing
+or checkout.
 
 ```sh
-npm install
 npm install --no-save playwright
 npx playwright install chromium
 npm run demo:playwright
 ```
 
-Then perform this exact test:
+The demo script starts:
 
-1. Open <http://127.0.0.1:3000>.
-2. Enter `Find an Apple Magic Keyboard` in **Purchase instruction**.
-3. Enter `http://127.0.0.1:43123/competition-site/` in **Target commerce site**. This is the local replay merchant served by the demo command.
-4. Press **Run purchase**.
-5. Observe the **Local browser fixture** badge, the automatically selected Apple Magic Keyboard, why it won, source URL, observed time, and the three-stage tracker. No selection click is needed for a unique winner; evidence remains in collapsed Advanced details.
-6. Repeat with `I want a mouse` and `I want earphones` to exercise automatic mouse and earphone paths. A replay containing tied candidates pauses in **Advanced details**; a no-match or unsafe browser result is labelled and handled through the seeded fallback. Stop both local processes with Ctrl-C.
+- the fixture site at `http://127.0.0.1:43123/competition-site/` using Python;
+  and
+- NaviPay with Playwright discovery enabled and `127.0.0.1` explicitly
+  allowlisted.
 
-The script serves `fixtures/competition-site/index.html` on port 43123 and starts NaviPay with Playwright discovery enabled, explicitly allowlisted to `127.0.0.1`. The target-site field never grants permission: a user URL is accepted only when its http or https scheme and host are already on that server-side allowlist. The worker sends no credentials and performs only bounded GET or HEAD reads. It never clicks search, checkout, order, or payment controls. The fixture's search form and product cards mirror the competition interaction while its normalized candidate payload is the deterministic replay seam.
+Open <http://127.0.0.1:3000>, expand **Optional product evidence**, set the
+target to the fixture URL, and run `Find an Apple Magic Keyboard`. The worker
+performs bounded GET or HEAD reads only. It does not click search, checkout,
+order, or payment controls, sends no credentials, and cannot reserve stock or
+authorize a side effect. NaviPay matches the observed candidate and quote to the
+seeded catalog before continuing. If the optional dependency or browser is
+unavailable, the product reports the labelled seeded-catalog fallback.
 
-If the optional `playwright` package or its browser is unavailable, the same steps show **Seeded catalog fallback** and explain that browser discovery was unavailable. The default `npm start` path shows **Seeded catalog** and never attempts browser discovery. Browser evidence is read-only and never has payment or checkout authority. NaviPay proceeds automatically only after a unique in-stock winner is ranked and the server matches its identity and quote amounts to the approved local quote. Discovery itself never reserves inventory, authorizes payment, creates an order, or invokes checkout. Approved merchant adapters remain mandatory for the authoritative quote, inventory, order, fulfillment, and payment boundaries.
+Stop both local processes with Ctrl-C.
 
-The adapter runs in a separate worker process, permits only GET and HEAD requests, and enforces page, tab, redirect, response-size, candidate, and deadline limits. It sends no credentials, uses no proxy, performs no arbitrary page evaluation, and has no checkout, order, inventory, or payment capability. If navigation is blocked, data is malformed or stale, a limit is exceeded, or the worker fails, NaviPay returns an unavailable discovery status with a safe reason code and uses the explicitly labelled seeded catalog fallback. Playwright is an optional local development tool and is not required for the default product or CI.
+## Roadmap and extension rules
 
-## API boundary
+The local implementation is intentionally a contract testbed. Any future adapter
+must normalize provider facts at the server boundary and preserve:
 
-Every sandbox task response includes the legacy `task` object for deliberate compatibility and a versioned server-owned `projection` read model. The customer projection contains only interpreted request data, recommendation rationale and catalog evidence, the locked quote and expiry, inventory reservation, financial snapshots, payment, merchant credit, order, fulfillment, delivery, receipt, safe operations, a redacted timeline, versioned `customerOutcome`, bounded `nextActions`, and a compact recorded-replay or deterministic-fallback disclosure. It never includes model proposals, raw reasoning, tool payloads, provider payloads, credentials, or full customer address details. `GET /api/tasks/:id/projection` retrieves the same projection after a reload; list responses include `projections`.
+- server-owned quote, currency, merchant, category, amount, quantity, and
+  expiry;
+- inventory-before-payment ordering;
+- scoped payment capability and provider-controlled credentials;
+- stable operation references and idempotent replay;
+- explicit unknown, reconciliation, compensation, refund, reversal, and
+  terminal-state behavior;
+- safe customer and reviewer projections with no raw provider payloads.
 
-The read-only reviewer contract is available at `GET /api/tasks/:id/reviewer` (with `GET /api/runs/:runId/reviewer` as an equivalent run lookup). It contains the four auditable stages, mode badge, signed replay-bundle or fallback provenance, a bounded safe context summary, typed model proposal, authoritative server policy decision, safe tool facts, evidence references and hashes, budgets, retries, checkpoints, event summaries, and final outcome. It never exposes the raw prompt, page text, provider payload, credential, or operator mutation control. `GET /api/tasks/:id/events` returns normalized append-only event identities without event payloads.
+Before moving beyond P0, the project needs approved contracts and credentials
+for the exact provider methods, identity model, status transitions, webhook
+authentication and replay rules, reconciliation endpoints, limits, finality,
+custody, KYC/AML responsibilities, refund behavior, and data-retention
+requirements. Live XSGD, real KYC, real cards or custody, hosted models, live
+merchant checkout, Amazon, and external delivery are all future work. Local mock
+funding, mock KYC, recorded replay, fake card, local checkout, and fixture
+delivery are evidence of this sandbox only, never proof that a corresponding
+live provider event occurred.
 
-Financial projections explicitly persist `balanceBeforeMinor`, `balanceAfterPaymentMinor`, `finalBalanceMinor`, `netChargedMinor`, `netRefundedMinor`, compensation status and references, and a financial `outcome`. These are task-scoped snapshots and never fall back to the current global wallet balance. Locked quotes also persist quote and cart IDs, a line snapshot, quote expiry/status, budget status, and a stable snapshot hash; inventory reservations and order confirmation validate that snapshot.
-
-### Capture receipt and later settlement
-
-The refund regression was reproduced through the browser contract: a successful mouse purchase followed by `POST /api/tasks/:id/payment/refund` returned a current task payment of `refunded` and financial `netChargedMinor: 0`, while `GET /api/tasks/:id/receipt` still reported `paymentStatus: authorized`, `finalBalanceMinor: 37850`, and `netChargedMinor: 12150`. Those values described the original capture, but the receipt did not label them as an immutable snapshot, so the read models appeared to conflict.
-
-The receipt now keeps those original capture values unchanged and labels them with `captureSnapshot`. A safe `adjustment` records the current refund or reversal status, current payment status, requested and recorded timestamps, amount, net charged and net refunded amounts, safe adjustment and ledger references, and the compensation outcome. A failed compensation records zero refunded and leaves the current payment as the original authorized capture with `netChargedMinor` unchanged. `GET /api/tasks/:id/receipt`, the task projection, and the frontend use the same redacted receipt projection. Audit events expose the adjustment reference, ledger transaction reference, status, and timestamp without provider payloads. Order, fulfillment, and delivery remain confirmed or independently failed; a payment adjustment does not rewrite commerce history.
-
-- `POST /api/purchases/run` with `{ "request": "I want a mouse" }` runs the complete bounded lifecycle. Send an `Idempotency-Key` header.
-- `POST /api/tasks/:id/run` resumes a run waiting for an explicit candidate selection after a genuine ambiguity or tie.
-- `POST /api/tasks/:id/payment/reconcile` with `{ "resolution": "authorized" }` or `{ "resolution": "declined" }` resolves an unknown issuer capture without retrying checkout or the transfer.
-- `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/receipt`, `GET /api/tasks/:id/audit`, and `GET /api/tasks/:id/card` expose persisted safe views.
-- `GET /api/cards/:cardId`, `GET /api/checkout/sessions/:sessionId`, and `GET /api/checkout/webhooks` expose only safe issuer and local gateway status fixtures. `POST /api/tasks/:id/payment/refund` and `/payment/reverse` are idempotent simulated post-capture actions.
-- `GET /api/wallet` exposes the seeded fake balance and ledger evidence. `GET /api/catalog` exposes safe catalog and stock facts.
-- `POST /api/reset` clears local purchase history and restores the seeded wallet and inventory.
-
-`GET /api/discovery` and the `discovery` field in task-list and purchase-run responses expose the server-owned, read-only discovery configuration projection. It reports whether the seeded catalog or local browser fixture is active, whether fallback is available, and the safe explanation shown by the UI. It never returns configured URLs, allowlists, worker details, credentials, or provider payloads. The selected candidate projection exposes only the validated source URL, observed timestamp, and match rationale for Advanced details.
-
-`POST /api/purchases/run` accepts `{ "request": "Find an Apple Magic Keyboard", "targetSite": "http://127.0.0.1:43123/competition-site/" }`. An absent target uses the configured challenge site when one is enabled. A malformed target is rejected; a syntactically valid but unapproved target is never fetched and produces an understandable unavailable/fallback result. The server-side allowlist is configured with `NAVIPAY_DISCOVERY_ALLOWLIST`; configured challenge URLs use `NAVIPAY_DISCOVERY_URLS` or `NAVIPAY_CHALLENGE_SITE_URL`.
-
-The server entrypoint is `src/server.js`. The product orchestration and adapter contracts are in `src/sandbox.js`. The JSON store is in `src/store.js`.
-
-## Bounded one-instruction authorization policy
-
-The primary purchase endpoint treats the instruction as a local authorization request, not as unrestricted shopping permission. NaviPay preserves the original text and a normalized envelope containing the brand, product, category, quantity, explicit budget or default XSGD 1,000 ceiling, currency, approved seeded merchant scope, and one-purchase purpose. Hard brand, product, and category constraints are never substituted.
-
-A purchase can receive an `AUTHORIZATION_APPROVED` decision only when the request is valid, one unique in-stock candidate is selected, the authoritative quote is fresh and internally consistent, the exact XSGD total is within budget, inventory is reserved, the local mock KYC gate is approved, the simulated wallet covers the total, the merchant and category are allowlisted, and no local risk or policy block is active. A tie, missing product type, exact out-of-stock result, stale quote, over-budget total, KYC or funding gate, duplicate, or policy violation receives a persisted redacted pause or rejection decision. Card issuance, capture, ledger debit, and order creation are downstream of that decision.
-
-The default local demo may bootstrap the pending mock KYC fixture through a deterministic simulated approval when a concrete one-instruction run starts, so the visible demo remains automatic. This is not identity verification and cannot authorize real funds. The explicit `pending-kyc` and `rejected-kyc` fixtures exercise the hard stop without issuing a card. The authorization decision and envelope are safe browser projections and contain no PAN, CVV, provider payload, or secret.
-
-This policy is a local-only simulation. The seeded merchant, fake wallet, mock KYC, local funding, issuer, checkout worker, order, fulfillment, and delivery adapters are replaceable seams for future provider adapters. No real provider credentials, KYC claims, funds, external checkout, Amazon scraping, or live StraitsX calls are enabled.
-
-## Recovery scenarios
-
-The server supports deterministic local scenarios for integration testing: `no-match`, `over-budget`, `ambiguity`, `ambiguous-same-brand`, `missing-product-type`, `pending-kyc`, `rejected-kyc`, `insufficient-funding`, `merchant-category-violation`, `policy-block`, `risk-block`, `duplicate-instruction`, `stale-quote`, `low-balance`, `insufficient-funds`, `payment-decline`, `decline`, `unknown-payment`, `unknown`, `timeout`, `wrong-merchant`, `amount-overage`, `expired-card`, `duplicate`, `browser-crash`, `card-issued-before-checkout`, `order-failure`, `order-commit-failure`, `merchant-credit-failure`, `out-of-stock`, `fulfillment-failure`, `delivery-failure`, `funding-failure`, and `discovery-failure`. They are API fixtures, not user-facing product controls.
-
-- No-match, over-budget, ambiguity, exact out-of-stock, low-balance, and payment decline outcomes stop before an unconfirmed payment and show explicit task-scoped results.
-- Insufficient funds and payment decline release the reservation and create no ledger entries.
-- Unknown payment holds the reservation and blocks retries. Reconciliation either applies the one idempotent transfer or releases the reservation.
-- Merchant-credit, order, and inventory-commit failures compensate an already confirmed wallet transfer and release stock without leaving a confirmed order. Compensation is itself a double-entry operation.
-- Checkpoint fixtures use persisted task snapshots and do not change the default seed for other runs.
-- Delivery and fulfillment failures do not rewrite a confirmed payment or order as failed. Their independent statuses remain visible on the receipt and task.
-- Repeating an idempotency key replays the persisted response. Repeating an adapter operation uses its persisted operation, reservation, transfer, order, or delivery reference and does not duplicate side effects.
-
-## Persistence and compatibility
-
-`src/store.js` uses version 2 state with an explicit migration from the previous version 1 task/audit store. It persists tasks, progress, operations, wallet transfers, ledger legs, reservations, orders, delivery records, issuer metadata, checkout sessions, refunds, funding and KYC state, agent runs, normalized append-only agent events, checkpoints, and idempotency responses. JSON writes use a restricted directory, a restricted temporary file, fsync, and atomic rename. A task can therefore be inspected and safely resumed after a process restart. This remains a single-process local JSON store and does not claim production concurrency.
-
-## XSGD funding and local KYC gate
-
-Funding is a separate provider-neutral seam in `src/funding.js`. The contract is intentionally small: `createFundingIntent`, `getFundingStatus`, `receiveProviderEvent`, and `reconcileReference`. The canonical normalized record contains only `status` (`pending`, `confirmed`, `failed`, `expired`, or `reversed`), provider reference, network, asset, amount in minor units, safe confirmation evidence, expiry, and safe credit references. `LocalMockXsgdFundingProvider` is the default and uses deterministic `mock://` deposit instructions. It makes no network call, creates no blockchain transaction, and never represents a live XSGD provider.
-
-Funding is gated by the provider-neutral KYC seam in `src/kyc.js`. `KycProviderContract` normalizes `getStatus`, `receiveDecision`, and `reconcileReference` to `approved`, `pending`, or `rejected`. `LocalMockKycProvider` is an explicit local decision simulator only. It stores status, decision references, timestamps, and an allowlisted reason code, never identity documents or raw provider payloads. An approved KYC status is required both when creating an intent and immediately before crediting the authoritative fake wallet.
-
-The local demonstration is:
-
-```sh
-# inspect the pending local KYC gate and wallet
-curl -sS http://127.0.0.1:3000/api/funding
-
-# approve the local-only gate - this is not identity verification
-curl -sS -X POST http://127.0.0.1:3000/api/funding/kyc/simulate \\
-  -H 'content-type: application/json' -H 'Idempotency-Key: demo-kyc-approve' \\
-  -H 'X-NaviPay-Local-Simulation: true' -d '{"action":"approve"}'
-
-# create deterministic mock deposit instructions
-curl -sS -X POST http://127.0.0.1:3000/api/funding/intents \\
-  -H 'content-type: application/json' -H 'Idempotency-Key: demo-funding-create' \\
-  -d '{"amount":"25.00"}'
-
-# use the returned intent ID to exercise confirm, fail, expire, or reverse
-curl -sS -X POST http://127.0.0.1:3000/api/funding/intents/FUNDING_ID/simulate \\
-  -H 'content-type: application/json' -H 'Idempotency-Key: demo-funding-confirm' \\
-  -H 'X-NaviPay-Local-Simulation: true' -d '{"action":"confirm"}'
-```
-
-`GET /api/funding` and `GET /api/funding/intents/:id` expose the safe funding projection, including current available fake balance, XSGD, the simulated Avalanche Fuji network, deposit instructions, status, provider reference, confirmation reference, KYC status, and the local-only disclosure. The simulation routes require the exact `X-NaviPay-Local-Simulation: true` header. Provider webhook routes (`/api/funding/webhooks` and `/api/funding/kyc/webhooks`) require the matching provider ID (`local-mock-xsgd-avalanche` for funding or `local-mock-kyc` for KYC), that header for the local provider, or a server-side `NAVIPAY_FUNDING_WEBHOOK_SECRET` or `NAVIPAY_KYC_WEBHOOK_SECRET`; no default secret is shipped. Reference reconciliation is available at `POST /api/funding/reconcile` and `/api/funding/kyc/reconcile`, or the corresponding `/references/:providerReference/reconcile` routes. These routes use stable reference-derived idempotency fallbacks and return normalized safe status only. Duplicate event IDs and idempotency keys are persisted, and confirmed funding adds exactly one pair of `funding` ledger legs. A reversal adds exactly one pair of `funding_reversal` legs. Failure and expiry add no credit.
-
-A future StraitsX and Avalanche implementation must not be inferred from this mock. Before enabling one, obtain official provider documentation and credentials for the exact following fields: intent creation endpoint and authentication scheme; supported XSGD asset identifier and decimal precision; Avalanche network and chain ID; destination or custody model and whether a memo/tag is required; exact amount and fee semantics; provider reference format; status and terminal-state mapping; confirmation-count or finality policy; webhook endpoint, signature algorithm, timestamp/replay rules, event IDs, and delivery retry semantics; reference reconciliation endpoint; expiry, failure, reversal, settlement, limits, KYC/AML, and refund behavior. The KYC adapter additionally requires the official verification decision states, decision/reference schema, document handling and retention rules, webhook signature, manual-review transitions, sanctions/AML prerequisites, and approved account or customer identifier semantics. NaviPay currently has no live endpoint, custody, KYC, settlement, or provider authentication implementation. Future credentials must be injected server-side through environment or deployment configuration such as `NAVIPAY_FUNDING_WEBHOOK_SECRET`; never put keys in task state, browser code, fixtures, or tests.
-
-## Future organizer adapters
-
-The local adapters are intentionally narrow replacement points. A future approved organizer integration can implement the canonical methods in `src/sandbox.js` for discovery, funding lookup, inventory reservation, wallet transfer, merchant credit, order, fulfillment, or delivery. Normalize provider status, timeout, and reference data inside that adapter, keep credentials in the provider process, and preserve the server-owned operation IDs, exact quote, inventory-before-payment invariant, idempotency, compensation, and redacted browser contract. The local fixtures remain the default until an approved provider contract and credentials exist. Adapters must return normalized facts to the service; projection builders are the only boundary used by browser read APIs.
-
-StraitsX and Amazon are future boundaries, not current integrations. StraitsX would require the official XSGD funding, custody, webhook, settlement, and KYC contracts described above. Amazon is not scraped or accessed; any future Amazon support would require an approved official API or partner contract, terms-compliant catalog and order capabilities, and a separate adapter. No live provider endpoint, Amazon credential, or external checkout is included here.
-
-## Agent mode and future boundaries
-
-The checked-in `fixtures/agent-replay-v1.json` is a versioned, SHA-256 integrity-checked response bundle used by the default recorded replay gateway. It contains model-shaped typed proposals only. `src/model-gateway.js` defines the provider-neutral seam; hosted and local model adapters are extension points and are not enabled in P0. The deterministic fallback gateway is credential-free and network-free.
-
-Funding evidence in an agent run is a local mock event. It does not prove an Avalanche transaction or real XSGD. Issuance uses the existing local fake issuer, and Execution uses the existing local checkout simulation. Real browser checkout, hosted model calls, live XSGD, real cards, custody, provider credentials, and external merchant automation remain P1/P2 work.
-
-## Deliberate boundary
-
-This is one local operator and one modular Node application. It is not a generalized marketplace, social login system, production wallet, custody service, KYC system, real-money payment integration, live inventory feed, or multi-merchant consumer product.
+For the full technical lifecycle and extension contract, continue to
+[`docs/architecture.md`](docs/architecture.md). For implementation, begin with
+[`src/server.js`](src/server.js), [`src/sandbox.js`](src/sandbox.js), and the
+tests in [`test/`](test/).
