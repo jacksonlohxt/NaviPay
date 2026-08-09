@@ -182,6 +182,79 @@
   .caret { animation: none; }
 }
 
+/* Presentation mode is a preference switch, never an access-control surface. */
+.topbar-controls { display: flex; align-items: center; justify-content: flex-end; gap: .45rem; min-width: 0; }
+.presentation-mode { display: inline-flex; align-items: center; gap: .18rem; padding: .18rem; border: 1px solid rgba(255, 255, 255, .16); border-radius: var(--radius-md); background: rgba(255, 255, 255, .04); }
+.presentation-mode-label { padding: 0 .3rem; color: rgba(255, 255, 255, .48); font-family: var(--font-mono); font-size: .55rem; letter-spacing: .06em; text-transform: uppercase; }
+.presentation-mode button { min-height: 25px; padding: .24rem .48rem; border: 1px solid transparent; border-radius: 7px; background: transparent; color: rgba(255, 255, 255, .58); font-size: .61rem; font-weight: 850; }
+.presentation-mode button:hover { border-color: rgba(189, 244, 119, .45); color: var(--color-lime); }
+.presentation-mode button[aria-pressed="true"] { background: var(--color-lime); color: var(--color-ink); }
+.presentation-mode button[aria-pressed="true"]:hover { color: var(--color-ink); }
+.brand > span:last-child { display: grid; gap: .06rem; }
+.brand small { color: rgba(255, 255, 255, .5); font-size: .58rem; font-weight: 600; }
+
+/* The active progress path uses the four customer-facing lifecycle boundaries. */
+.stage-tracker { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.stage-item { display: flex; align-items: center; gap: .6rem; min-width: 0; padding: .8rem .7rem; border: 1px solid rgba(255, 255, 255, .12); border-radius: var(--radius-md); background: rgba(255, 255, 255, .04); }
+.stage-item.complete { border-color: rgba(189, 244, 119, .35); background: rgba(189, 244, 119, .09); }
+.stage-item.active { border-color: rgba(189, 244, 119, .55); background: rgba(189, 244, 119, .16); }
+.stage-item.attention { border-color: rgba(255, 146, 115, .55); background: rgba(255, 146, 115, .12); }
+.stage-item.complete .stage-number, .stage-item.active .stage-number { background: var(--color-lime); color: var(--color-ink); }
+.stage-item.attention .stage-number { background: var(--color-coral); color: var(--color-ink); }
+
+/* Developer evidence is deliberately separate from the calm customer result. */
+.developer-evidence { display: grid; gap: .7rem; padding: clamp(1rem, 2.8vw, 1.35rem); border: 1px solid rgba(255, 255, 255, .14); border-radius: var(--radius-xl); background: rgba(255, 255, 255, .055); color: var(--color-white); }
+.developer-evidence-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.developer-evidence-heading h2 { margin: .3rem 0 .25rem; color: var(--color-white); font-size: 1.2rem; letter-spacing: -.04em; }
+.developer-evidence-heading p, .developer-disclosure { margin: 0; max-width: 530px; color: rgba(255, 255, 255, .58); font-size: .7rem; }
+.developer-simulation-boundary { margin: 0; padding: .7rem .8rem; border: 1px solid rgba(189, 244, 119, .22); border-radius: var(--radius-md); background: rgba(189, 244, 119, .08); color: var(--color-lime); font-family: var(--font-mono); font-size: .62rem; }
+.developer-lifecycle { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .45rem; }
+.developer-stage { min-width: 0; padding: .7rem; border: 1px solid rgba(255, 255, 255, .12); border-radius: var(--radius-md); background: rgba(255, 255, 255, .045); }
+.developer-stage strong, .developer-stage small { display: block; overflow-wrap: anywhere; }
+.developer-stage strong { margin-top: .25rem; color: var(--color-white); font-size: .76rem; }
+.developer-stage small { margin-top: .2rem; color: rgba(255, 255, 255, .5); font-size: .61rem; }
+.developer-group { border-top: 1px solid rgba(255, 255, 255, .13); }
+.developer-group > summary { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .8rem 0 .65rem; color: var(--color-white); cursor: pointer; font-size: .76rem; font-weight: 850; }
+.developer-group > summary span { color: rgba(255, 255, 255, .45); font-size: .61rem; font-weight: 700; }
+.developer-content { display: grid; gap: .7rem; padding: 0 0 .75rem; }
+.developer-evidence .detail-row { border-bottom-color: rgba(255, 255, 255, .1); }
+.developer-evidence .detail-row dt { color: rgba(255, 255, 255, .48); }
+.developer-evidence .detail-row dd { color: rgba(255, 255, 255, .84); }
+.developer-checks, .developer-operations { display: grid; gap: .4rem; }
+.developer-check { display: grid; gap: .3rem; padding: .6rem .7rem; border: 1px solid rgba(255, 255, 255, .1); border-radius: var(--radius-sm); background: rgba(255, 255, 255, .035); }
+.developer-check > div { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+.developer-check strong { overflow-wrap: anywhere; font-size: .68rem; }
+.developer-check small, .developer-muted { color: rgba(255, 255, 255, .48); font-size: .62rem; }
+.developer-operation { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(90px, .65fr); align-items: center; gap: .7rem; padding: .6rem .7rem; border: 1px solid rgba(255, 255, 255, .1); border-radius: var(--radius-sm); background: rgba(255, 255, 255, .035); }
+.developer-operation strong, .developer-operation small, .developer-operation > span { display: block; overflow-wrap: anywhere; }
+.developer-operation strong { font-size: .68rem; }
+.developer-operation small, .developer-operation > span { margin-top: .16rem; color: rgba(255, 255, 255, .45); font-family: var(--font-mono); font-size: .59rem; }
+.developer-operation > span { text-align: right; }
+.developer-activity { display: grid; gap: .4rem; margin: 0; padding: 0; list-style: none; }
+.developer-activity li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .7rem; padding: .6rem .7rem; border: 1px solid rgba(255, 255, 255, .1); border-radius: var(--radius-sm); background: rgba(255, 255, 255, .035); }
+.developer-activity strong, .developer-activity small { display: block; overflow-wrap: anywhere; }
+.developer-activity strong { font-family: var(--font-mono); font-size: .63rem; }
+.developer-activity small { margin-top: .16rem; color: rgba(255, 255, 255, .46); font-size: .59rem; }
+.developer-activity li > div:last-child { text-align: right; }
+.developer-activity li > div:last-child > span { color: var(--color-lime); font-family: var(--font-mono); font-size: .59rem; }
+.developer-subdetails { border: 1px solid rgba(255, 255, 255, .1); border-radius: var(--radius-sm); }
+.developer-subdetails summary { padding: .6rem .7rem; color: rgba(255, 255, 255, .78); cursor: pointer; font-size: .65rem; font-weight: 800; }
+.developer-code { max-height: 280px; margin: 0; padding: .7rem; overflow: auto; border-top: 1px solid rgba(255, 255, 255, .1); color: rgba(255, 255, 255, .65); font-family: var(--font-mono); font-size: .58rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 650px) {
+  .topbar-controls { flex-wrap: wrap; justify-content: flex-end; }
+  .presentation-mode-label { display: none; }
+  .presentation-mode { padding: .16rem; }
+  .stage-tracker { grid-template-columns: 1fr; }
+  .stage-item { padding: .72rem .7rem; }
+  .developer-evidence-heading { flex-direction: column; }
+  .developer-lifecycle { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .developer-operation { grid-template-columns: minmax(0, 1fr) auto; }
+  .developer-operation > span { grid-column: 1 / -1; text-align: left; }
+  .developer-activity li { grid-template-columns: 1fr; }
+  .developer-activity li > div:last-child { text-align: left; }
+}
+
 /* One calm order record owns the terminal result. */
 .attempted-purchase-panel {
   padding: clamp(1rem, 2.8vw, 1.35rem);
