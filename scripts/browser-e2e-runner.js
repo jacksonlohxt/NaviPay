@@ -82,18 +82,26 @@ async function main() {
   await waitForServer();
   runChrome(['open', baseUrl]);
   runChrome(['resize', '1440', '1000']);
+  runChrome(['eval', '() => { localStorage.removeItem("navipay.presentation-mode"); location.reload(); return "customer-default"; }']);
+  waitForText(/What should we buy/);
 
   let text = pageText();
   assert.match(text, /What should we buy/);
   assert.match(text, /One instruction/);
   assert.match(text, /Optional product evidence/);
+  assert.match(text, /Customer/);
+  assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=customer]")?.getAttribute("aria-pressed")']), /true/);
+  assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /false/);
   assertDefaultSurface(text, 'idle');
 
   // Hold the request long enough to assert the running state as a real user would see it.
   runChrome(['eval', '() => { const original = window.fetch; window.__navipayFetch = original; window.fetch = (...args) => new Promise(resolve => setTimeout(() => resolve(original(...args)), 350)); document.querySelector("#request-input").value = "buy a Logitech mouse"; document.querySelector("#request-form").requestSubmit(); return "submitted"; }']);
   text = pageText();
   assert.match(text, /Working on it|Running/);
-  assert.match(text, /Find item/);
+  assert.match(text, /Purchase/);
+  assert.match(text, /Order/);
+  assert.match(text, /Fulfillment/);
+  assert.match(text, /Delivery/);
   text = waitForText(/Purchase delivered|Purchase complete/);
   assert.match(text, /Purchase delivered/);
   assert.match(text, /Logitech MX Master 3S/);
@@ -101,9 +109,10 @@ async function main() {
   assert.match(text, /XSGD 121\.50/);
   assert.match(text, /Confirmed/);
   assert.match(text, /Delivered/);
-  assert.match(text, /Receipt/);
+  assert.match(text, /Receipt/i);
   assert.doesNotMatch(text, /Your purchase/);
-  assert.doesNotMatch(text, /Purchase steps|What happens next|ORDER STATUS|View receipt/i);
+  assert.doesNotMatch(text, /Purchase steps|Purchase progress|What happens next|ORDER STATUS|View receipt/i);
+  assert.doesNotMatch(text, /Agent mode|Developer evidence|recorded replay/i);
   assert.match(runChrome(['eval', '() => document.querySelectorAll(".receipt-status-row").length']), /1/);
   assert.match(runChrome(['eval', '() => document.querySelector(".selection-details")?.open || false']), /false/);
   runChrome(['eval', '() => { document.querySelector(".selection-details summary")?.click(); return "opened"; }']);
@@ -113,6 +122,25 @@ async function main() {
   assertDefaultSurface(text, 'success');
   assert.doesNotMatch(text, /More about this purchase\nEvidence, references, and activity\n[^]*Ledger transaction/);
   assert.doesNotMatch(text, /Remaining demo balance|Task-scoped demo balance/);
+
+  // The explicit developer view reveals safe server-owned evidence for the same run.
+  runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=developer]").click(); return "developer-selected"; }']);
+  text = waitForText(/Developer evidence/);
+  for (const evidence of ['Interpreted request', 'Quote ID', 'KYC', 'issuer', 'Order, fulfillment, and delivery', 'reconciliation', 'recorded replay']) {
+    assert.match(runChrome(['eval', `() => document.querySelector(".developer-evidence")?.innerText.includes(${JSON.stringify(evidence)})`]), /true/, `developer evidence missing: ${evidence}`);
+  }
+  assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /true/);
+  assert.match(runChrome(['eval', '() => !/PAN|CVV|private key|rawProviderPayload|credentials\\s*:/i.test(document.body.textContent)']), /true/);
+  assert.match(runChrome(['eval', '() => localStorage.getItem("navipay.presentation-mode")']), /developer/);
+
+  // The presentation preference survives a refresh, and customer mode remains one click away.
+  runChrome(['eval', '() => { location.reload(); return "reloading-developer"; }']);
+  text = waitForText(/Developer evidence/);
+  assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /true/);
+  runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=customer]").click(); return "customer-selected"; }']);
+  text = waitForText(/Customer view/);
+  assert.doesNotMatch(text, /Developer evidence|Quote ID|KYC|recorded replay/i);
+  assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=customer]")?.getAttribute("aria-pressed")']), /true/);
 
   // The payment drawer is secondary, human-facing, safe, and keyboard dismissible.
   runChrome(['eval', '() => { window.fetch = window.__navipayFetch || window.fetch; document.querySelector("[data-open-drawer]").click(); return "drawer-open"; }']);
@@ -134,7 +162,7 @@ async function main() {
   assert.match(narrow, /narrow-ok/);
   text = pageText();
   assert.match(text, /Purchase confirmed/);
-  assert.doesNotMatch(text, /Purchase steps|What happens next|Your purchase|View receipt/i);
+  assert.doesNotMatch(text, /Purchase steps|Purchase progress|What happens next|Your purchase|View receipt/i);
   assert.doesNotMatch(text, /Remaining demo balance|Task-scoped demo balance/);
   runChrome(['eval', '() => { document.querySelector("[data-open-drawer]").click(); return "narrow-drawer-open"; }']);
   text = pageText();
@@ -150,7 +178,7 @@ async function main() {
   assert.match(text, /No purchase record|Purchase details/);
   assert.match(text, /Nothing was reserved or paid/);
   assert.match(text, /No receipt/);
-  assert.doesNotMatch(text, /Purchase confirmed|Purchase complete|Purchase steps|Your purchase/);
+  assert.doesNotMatch(text, /Purchase confirmed|Purchase complete|Purchase steps|Purchase progress|Your purchase/);
   assertDefaultSurface(text, 'no-match');
 
   // Unknown payment is automatically actionable and explicitly non-retryable.
@@ -164,7 +192,7 @@ async function main() {
   assert.match(text, /No receipt/);
   assert.match(text, /Payment was approved/);
   assert.match(text, /Payment was declined/);
-  assert.match(text, /Purchase steps/i);
+  assert.match(text, /Purchase progress/i);
   assert.doesNotMatch(text, /Your purchase|What happened/);
   assert.match(runChrome(['eval', '() => document.querySelectorAll(".advanced-details[open]").length']), /0/);
   assertDefaultSurface(text, 'unknown payment');
@@ -179,7 +207,7 @@ async function main() {
   assert.match(text, /Confirmed/);
   assert.match(text, /Purchase confirmed/);
   assert.match(text, /Needs attention/);
-  assert.doesNotMatch(text, /Purchase steps|What happens next|Your purchase|View receipt/i);
+  assert.doesNotMatch(text, /Purchase steps|Purchase progress|What happens next|Your purchase|View receipt/i);
   assertDefaultSurface(text, 'delivery failure');
 
   // No-purchase states expose the reason and explicit downstream side effects.
@@ -198,7 +226,7 @@ async function main() {
     assert.match(text, /No purchase record|Purchase details/i, label);
     assert.match(text, /No order|No confirmed order/, label);
     assert.match(text, /No receipt/, label);
-    assert.doesNotMatch(text, /Your purchase|What happens next|ORDER STATUS/, label);
+    assert.doesNotMatch(text, /Your purchase|What happens next|ORDER STATUS|Purchase progress/, label);
     assertDefaultSurface(text, label);
   }
 
@@ -214,7 +242,7 @@ async function main() {
   text = pageText();
   assert.match(text, /Purchase delivered/);
   assert.doesNotMatch(text, /No automatic retry will occur/);
-  assert.doesNotMatch(text, /Purchase steps|Your purchase|View receipt/i);
+  assert.doesNotMatch(text, /Purchase steps|Purchase progress|Your purchase|View receipt/i);
   assertDefaultSurface(text, 'reconciled payment');
 
   // Refund and reversal keep the immutable original receipt visible next to the current update.

@@ -13,7 +13,9 @@ test('frontend contract keeps the calm purchase path and safe secondary surfaces
   assert.match(index, /styles-calm-overrides/);
   assert.match(frontend, /data-example/);
   assert.match(frontend, /stage-tracker/);
-  assert.match(frontend, /Find item/);
+  assert.match(frontend, /Purchase/);
+  assert.match(frontend, /Fulfillment/);
+  assert.match(frontend, /Delivery/);
   assert.match(frontend, /Payment/);
   assert.match(frontend, /Purchase confirmed/);
   assert.match(frontend, /canonical-order-card/);
@@ -39,6 +41,11 @@ test('frontend contract keeps the calm purchase path and safe secondary surfaces
   assert.match(frontend, /Order and delivery/);
   assert.match(frontend, /customerOutcome/);
   assert.match(frontend, /nextActions/);
+  assert.match(frontend, /PRESENTATION_MODE_STORAGE_KEY/);
+  assert.match(frontend, /data-presentation-mode/);
+  assert.match(frontend, /developerEvidence/);
+  assert.match(frontend, /Quote ID/);
+  assert.match(frontend, /KYC/);
   assert.match(frontend, /No receipt was issued/);
   assert.doesNotMatch(frontend, /Purchase effects|progressBands/);
 });
@@ -52,4 +59,7 @@ test('frontend contract retains truthful failure language and accessible visual 
   assert.match(stylesheet, /prefers-reduced-motion/);
   assert.match(stylesheet, /grid-template-columns: repeat\(3, 1fr\)/);
   assert.match(calmStylesheet, /receipt-status-row/);
+  assert.match(calmStylesheet, /presentation-mode/);
+  assert.match(calmStylesheet, /developer-evidence/);
+  assert.match(calmStylesheet, /grid-template-columns: repeat\(4/);
 });
