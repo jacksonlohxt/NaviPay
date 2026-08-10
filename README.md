@@ -430,6 +430,7 @@ status codes, and errors. Send `Idempotency-Key` on every mutating request.
 | Payment reverse    | `POST /api/tasks/:id/payment/reverse`   |
 | Funding and KYC    | `/api/funding` and `/api/funding/kyc`   |
 | Catalog and wallet | `/api/catalog` and `/api/wallet`        |
+| Developer top-up  | `POST /api/wallet/simulated-top-up`     |
 | Reset              | `POST /api/reset`                       |
 | Optional discovery | `/api/discovery` and `targetSite`       |
 
@@ -452,6 +453,14 @@ Contract notes:
 - `targetSite` is optional on the purchase run. The server validates its URL and
   allowlist before the bounded browser worker can read it. The worker never gets
   payment or checkout authority.
+- Developer mode exposes **Add simulated funds** for local scenario setup. The
+  control calls `POST /api/wallet/simulated-top-up` with a stable
+  `Idempotency-Key` and `X-NaviPay-Local-Simulation: true`. It accepts XSGD only,
+  credits the server-owned fake wallet through balanced local ledger legs, and
+  records a safe top-up reference and audit event. It never starts or approves a
+  purchase; use the canonical purchase route afterward. Customer mode does not
+  render this control. Invalid, zero, negative, malformed, or over-limit amounts
+  are rejected by the server.
 
 Funding examples use the explicit local simulation authorization header and are
 deliberately not live-provider instructions:
@@ -478,6 +487,25 @@ The mock funding flow uses a `mock://`-style local instruction and makes no
 network call. It does not create a blockchain transaction or accept a real
 deposit. Do not treat its reference, network label, or confirmation evidence as
 provider evidence.
+
+For deterministic insufficient-funds and recovery setup, use the Developer
+view's **Add simulated funds** control after a failed purchase. The equivalent
+local-only API call is:
+
+```sh
+curl -sS -X POST http://127.0.0.1:3000/api/wallet/simulated-top-up \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: demo-top-up-25' \
+  -H 'X-NaviPay-Local-Simulation: true' \
+  -d '{"amount":"25.00","currency":"XSGD"}'
+```
+
+The top-up response includes the updated fake wallet, balanced simulation ledger
+legs, a safe action and transaction reference, and persisted top-up and audit
+records.
+Repeated requests with the same action key replay the original result without a
+second credit. This route is for the documented loopback local simulation only,
+not a real funding or custody boundary.
 
 ## Local setup and validation
 
