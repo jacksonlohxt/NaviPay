@@ -1,8 +1,11 @@
 // Acceptance track: shared canonical state and projection presentation preference.
 const PRESENTATION_MODE_STORAGE_KEY = 'navipay.presentation-mode';
 const TOP_UP_PENDING_ACTION_KEY = 'navipay.simulated-top-up.pending-action';
+const RESTOCK_PENDING_ACTION_KEY = 'navipay.simulation-restock.pending-action';
 const TOP_UP_PRESETS = Object.freeze(['10.00', '25.00', '100.00', '250.00']);
+const RESTOCK_PRESETS = Object.freeze(['1', '5', '10', '25', '50']);
 const TOP_UP_MAX_MINOR = 100000000;
+const RESTOCK_MAX_QUANTITY = 100;
 const PRESENTATION_MODES = Object.freeze(['customer', 'developer']);
 
 function readPresentationMode() {
@@ -34,6 +37,7 @@ const state = {
   reviewerError: null,
   discovery: null,
   funding: null,
+  simulationResources: null,
   wallet: null,
   walletTopups: [],
   walletAudit: [],
@@ -48,7 +52,10 @@ const state = {
   drawerTrigger: null,
   pendingRequest: '',
   topUpError: null,
-  topUpNotice: null
+  topUpNotice: null,
+  restockSku: 'sku-razer-deathadder-v3',
+  restockError: null,
+  restockNotice: null
 };
 
 const app = document.querySelector('#app');
@@ -89,6 +96,34 @@ function clearPendingTopUpAction(key) {
   try {
     const saved = JSON.parse(window.localStorage.getItem(TOP_UP_PENDING_ACTION_KEY) || 'null');
     if (saved?.key === key) window.localStorage.removeItem(TOP_UP_PENDING_ACTION_KEY);
+  } catch {
+    // A storage restriction should not block a completed local simulation.
+  }
+}
+
+function readPendingRestockAction(sku, quantity) {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(RESTOCK_PENDING_ACTION_KEY) || 'null');
+    return saved?.sku === sku && saved?.quantity === quantity && typeof saved.key === 'string' ? saved.key : null;
+  } catch {
+    return null;
+  }
+}
+
+function restockActionKey(sku, quantity) {
+  const existing = readPendingRestockAction(sku, quantity);
+  if (existing) return existing;
+  const key = `developer-restock-${window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+  try { window.localStorage.setItem(RESTOCK_PENDING_ACTION_KEY, JSON.stringify({ sku, quantity, key })); } catch {
+    // The server still validates the request; persistence is best effort.
+  }
+  return key;
+}
+
+function clearPendingRestockAction(key) {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(RESTOCK_PENDING_ACTION_KEY) || 'null');
+    if (saved?.key === key) window.localStorage.removeItem(RESTOCK_PENDING_ACTION_KEY);
   } catch {
     // A storage restriction should not block a completed local simulation.
   }
@@ -528,15 +563,36 @@ function topUpAmountError(amount) {
   return '';
 }
 
-function developerWalletPanel() {
-  const wallet = state.wallet || state.funding?.wallet || {};
-  const topups = state.walletTopups || [];
-  const latest = topups[0] || null;
+function restockQuantityError(quantity) {
+  if (!quantity) return 'Enter a quantity to add.';
+  if (!/^[1-9]\d*$/.test(quantity)) return 'Restock quantity must be a positive whole number.';
+  const normalized = Number(quantity);
+  const maximum = state.simulationResources?.limits?.restockMaxQuantity || RESTOCK_MAX_QUANTITY;
+  if (!Number.isSafeInteger(normalized) || normalized > maximum) return `Restock quantity cannot exceed ${maximum} units per action.`;
+  return '';
+}
+
+function developerResourcesPanel() {
+  const resources = state.simulationResources || {};
+  const wallet = resources.wallet || state.wallet || state.funding?.wallet || {};
+  const inventory = Array.isArray(resources.inventory) ? resources.inventory : [];
+  const topups = resources.wallet?.topups || state.walletTopups || [];
+  const latestTopUp = topups[0] || null;
+  const restocks = Array.isArray(resources.restocks) ? resources.restocks : [];
+  const latestRestock = restocks[0] || null;
+  const selected = inventory.find((item) => item.sku === state.restockSku) || inventory[0] || null;
+  const restockLimit = resources.limits?.restockMaxQuantity || RESTOCK_MAX_QUANTITY;
   const balance = Number.isFinite(wallet.balanceMinor) ? formatMoney(wallet.balanceMinor, wallet.currency || 'XSGD') : 'Not available';
-  const notice = state.topUpNotice ? `<p id="top-up-notice" class="top-up-notice" role="status" tabindex="-1">${escapeHtml(state.topUpNotice)}</p>` : '';
-  const error = state.topUpError ? `<p id="top-up-error" class="form-error" role="alert">${escapeHtml(state.topUpError)}</p>` : '<p id="top-up-error" class="form-error" role="alert" hidden></p>';
-  const latestRecord = latest ? `<div class="top-up-record" aria-label="Latest simulated top-up"><div><span class="data-label">Latest local top-up</span><strong>${escapeHtml(latest.amount || formatMoney(latest.amountMinor, latest.currency || 'XSGD'))}</strong><small>${escapeHtml(latest.status)} · action ${escapeHtml(latest.actionReference || 'Not available')}</small></div><div><span class="data-label">Transaction record</span><strong>${escapeHtml(latest.transactionReference || 'Not available')}</strong><small>${escapeHtml(latest.mode || 'local_simulation')}</small></div></div>` : '<p class="developer-muted">No simulated top-ups recorded yet.</p>';
-  return `<section class="developer-wallet-panel" aria-labelledby="developer-wallet-title"><div class="developer-evidence-heading"><div><span class="overline">Developer control</span><h2 id="developer-wallet-title">Simulated wallet</h2><p>Use this local-only control to create deterministic balance scenarios. It cannot approve a purchase.</p></div>${modeBadge('Local simulation')}</div><div class="developer-simulation-boundary">LOCAL SIMULATION ONLY - no real funds, provider deposit, or blockchain activity.</div><div class="wallet-control-summary">${dataCell('Available simulated balance', balance, 'Server-owned fake wallet')}${dataCell('Currency', wallet.currency || 'XSGD', 'Only XSGD is supported')}${dataCell('Top-up records', topups.length, 'Persisted local evidence')}</div><form id="top-up-form" novalidate><fieldset><legend>Add simulated funds</legend><p class="developer-muted">Choose a preset or enter a custom XSGD amount. This only credits the local fake wallet.</p><div class="top-up-presets" role="group" aria-label="Simulated XSGD amount presets">${TOP_UP_PRESETS.map((preset) => `<button type="button" class="quiet-button" data-top-up-preset="${preset}"${state.busy ? ' disabled' : ''}>XSGD ${preset}</button>`).join('')}</div><label for="top-up-amount">Amount in XSGD</label><div class="top-up-form-row"><input id="top-up-amount" name="amount" type="text" inputmode="decimal" autocomplete="off" maxlength="20" placeholder="25.00" aria-describedby="top-up-help top-up-error"${state.busy ? ' disabled' : ''}><button type="submit" class="secondary-button"${state.busy ? ' disabled' : ''}>Add simulated funds</button></div><small id="top-up-help" class="developer-muted">Positive XSGD only, up to XSGD 1,000,000.00. Replaying the same action is safe.</small>${error}</fieldset></form>${latestRecord}${notice}<p class="developer-disclosure">Technical record is a local simulation reference. It is not proof of real funds and never includes payment credentials or provider payloads.</p></section>`;
+  const topUpNotice = state.topUpNotice ? `<p id="top-up-notice" class="top-up-notice" role="status" tabindex="-1">${escapeHtml(state.topUpNotice)}</p>` : '';
+  const topUpError = state.topUpError ? `<p id="top-up-error" class="form-error" role="alert">${escapeHtml(state.topUpError)}</p>` : '<p id="top-up-error" class="form-error" role="alert" hidden></p>';
+  const latestTopUpRecord = latestTopUp ? `<div class="top-up-record" aria-label="Latest simulated top-up"><div><span class="data-label">Latest local top-up</span><strong>${escapeHtml(latestTopUp.amount || formatMoney(latestTopUp.amountMinor, latestTopUp.currency || 'XSGD'))}</strong><small>${escapeHtml(latestTopUp.status)} · action ${escapeHtml(latestTopUp.actionReference || 'Not available')}</small></div><div><span class="data-label">Transaction record</span><strong>${escapeHtml(latestTopUp.transactionReference || 'Not available')}</strong><small>${escapeHtml(latestTopUp.mode || 'local_simulation')}</small></div></div>` : '<p class="developer-muted">No simulated top-ups recorded yet.</p>';
+  const inventoryRows = inventory.map((item) => `<div class="simulation-inventory-row" role="listitem"><div><strong>${escapeHtml(item.item)}</strong><small>${escapeHtml(item.merchant)} · ${escapeHtml(item.variant || 'Seeded item')}</small></div><div><span class="data-label">Available now</span><strong>${escapeHtml(item.availableQuantity)}</strong><small>${escapeHtml(item.reservedQuantity)} reserved in active purchase flows</small></div></div>`).join('');
+  const restockOptions = inventory.map((item) => `<option value="${escapeHtml(item.sku)}"${item.sku === selected?.sku ? ' selected' : ''}>${escapeHtml(item.item)} · ${escapeHtml(item.merchant)} · ${escapeHtml(item.availableQuantity)} available</option>`).join('');
+  const selectedSummary = selected ? `<p class="restock-selected" id="restock-selected-summary"><span>Selected item</span><strong>${escapeHtml(selected.item)}</strong><small>Available simulated stock now: ${escapeHtml(selected.availableQuantity)} units. Reserved units are not changed by restocking.</small></p>` : '<p class="developer-muted">No seeded item is available to restock.</p>';
+  const latestRestockRecord = latestRestock ? `<div class="restock-record" aria-label="Latest simulated inventory restock"><div><span class="data-label">Latest simulated restock</span><strong>${escapeHtml(latestRestock.item)}</strong><small>${escapeHtml(latestRestock.merchant)} · +${escapeHtml(latestRestock.quantityAdded)} units</small></div><div><span class="data-label">Available stock</span><strong>${escapeHtml(latestRestock.availableBeforeQuantity)} → ${escapeHtml(latestRestock.availableAfterQuantity)}</strong><small>Before → after · ${escapeHtml(latestRestock.status)}</small></div></div>` : '<p class="developer-muted">No simulated inventory restocks recorded yet.</p>';
+  const restockNotice = state.restockNotice ? `<p id="restock-notice" class="top-up-notice" role="status" tabindex="-1">${escapeHtml(state.restockNotice)}</p>` : '';
+  const restockError = state.restockError ? `<p id="restock-error" class="form-error" role="alert">${escapeHtml(state.restockError)}</p>` : '<p id="restock-error" class="form-error" role="alert" hidden></p>';
+  return `<section class="developer-resources-panel" aria-labelledby="simulation-resources-title"><div class="developer-evidence-heading"><div><span class="overline">Developer control</span><h2 id="simulation-resources-title">Simulation resources</h2><p>Manage the local simulated balance and seeded sandbox stock used for safe scenario testing. These controls cannot approve a purchase.</p></div>${modeBadge('Local simulation')}</div><div class="developer-simulation-boundary">SIMULATION RESOURCES ONLY - fake XSGD balance and seeded local stock. No real funds, live inventory, provider deposit, or blockchain activity.</div><section class="simulation-resource-group" aria-labelledby="simulation-wallet-title"><div class="simulation-resource-heading"><div><span class="overline">Simulated balance</span><h3 id="simulation-wallet-title">Simulated wallet</h3></div><span class="resource-status">Server-owned local state</span></div><div class="wallet-control-summary">${dataCell('Available simulated balance', balance, 'Fake wallet only')}${dataCell('Currency', wallet.currency || 'XSGD', 'Only XSGD is supported')}${dataCell('Top-up records', topups.length, 'Persisted local evidence')}</div><form id="top-up-form" novalidate><fieldset><legend>Add simulated funds</legend><p class="developer-muted">Choose a preset or enter a custom XSGD amount. This only credits the local fake wallet.</p><div class="top-up-presets" role="group" aria-label="Simulated XSGD amount presets">${TOP_UP_PRESETS.map((preset) => `<button type="button" class="quiet-button" data-top-up-preset="${preset}"${state.busy ? ' disabled' : ''}>XSGD ${preset}</button>`).join('')}</div><label for="top-up-amount">Amount in XSGD</label><div class="top-up-form-row"><input id="top-up-amount" name="amount" type="text" inputmode="decimal" autocomplete="off" maxlength="20" placeholder="25.00" aria-describedby="top-up-help top-up-error"${state.busy ? ' disabled' : ''}><button type="submit" class="secondary-button"${state.busy ? ' disabled' : ''}>Add simulated funds</button></div><small id="top-up-help" class="developer-muted">Positive XSGD only, up to XSGD 1,000,000.00. Replaying the same action is safe.</small>${topUpError}</fieldset></form>${latestTopUpRecord}${topUpNotice}</section><section class="simulation-resource-group" aria-labelledby="simulation-inventory-title"><div class="simulation-resource-heading"><div><span class="overline">Seeded sandbox stock</span><h3 id="simulation-inventory-title">Sandbox inventory</h3></div><span class="resource-status">Simulated only</span></div><p class="developer-muted">These are the real seeded catalog items used by local purchase runs. Restocking adds available units only and never changes an existing reservation, quote, order, or payment.</p><div class="simulation-inventory-list" role="list" aria-label="Seeded simulated inventory">${inventoryRows}</div><form id="restock-form" novalidate><fieldset><legend>Restock a seeded item</legend><label for="restock-sku">Target item</label><select id="restock-sku" name="sku" aria-describedby="restock-selected-summary restock-error"${state.busy || !inventory.length ? ' disabled' : ''}>${restockOptions}</select>${selectedSummary}<div class="restock-presets" role="group" aria-label="Simulated restock quantity presets">${RESTOCK_PRESETS.map((preset) => `<button type="button" class="quiet-button" data-restock-preset="${preset}"${state.busy || !inventory.length ? ' disabled' : ''}>+${preset} unit${preset === '1' ? '' : 's'}</button>`).join('')}</div><label for="restock-quantity">Quantity to add</label><div class="top-up-form-row"><input id="restock-quantity" name="quantity" type="text" inputmode="numeric" autocomplete="off" maxlength="4" placeholder="5" aria-describedby="restock-help restock-error"${state.busy || !inventory.length ? ' disabled' : ''}><button type="submit" class="secondary-button"${state.busy || !inventory.length ? ' disabled' : ''}>Restock simulated stock</button></div><small id="restock-help" class="developer-muted">Positive whole numbers only, up to ${escapeHtml(restockLimit)} units per action. Existing reservations remain unchanged.</small>${restockError}</fieldset></form>${latestRestockRecord}${restockNotice}</section><p class="developer-disclosure">Every resource fact and change is a server-owned local simulation record. It is not proof of real money or live merchant stock and never includes payment credentials or provider payloads.</p></section>`;
 }
 
 function developerEvidence(task) {
@@ -621,7 +677,7 @@ function runView(task) {
   const stagePanel = showStages ? `<section class="stage-card"><div class="panel-heading"><div><span class="overline">Purchase progress</span><h2>Purchase to delivery</h2></div><span class="stage-caption">${task.state === 'awaiting_selection' || task.state === 'reconciliation_required' ? 'Action needed below' : 'Updated now'}</span></div>${stageTracker(stages)}</section>` : '';
   const orderCard = hasReceipt ? receiptPanel(task) : attemptedPurchasePanel(task);
   const evidence = isDeveloperMode() ? developerEvidence(task) : advancedDetails(task);
-  const developerPanel = isDeveloperMode() ? developerWalletPanel() : '';
+  const developerPanel = isDeveloperMode() ? developerResourcesPanel() : '';
   return `<section class="run-view"><div class="run-heading"><div><span class="overline">Purchase status</span><h1>${escapeHtml(taskRequest(task))}</h1></div><div class="run-actions">${modeBadge(isDeveloperMode() ? 'Developer view' : 'Customer view')}<button type="button" class="quiet-dark-button" data-new-purchase>New purchase</button></div></div>${outcome(task)}${orderCard}${stagePanel}${taskFacts(task)}${developerPanel}${evidence}${historyDetails()}</section>`;
 }
 
@@ -638,8 +694,8 @@ function render() {
   app.setAttribute('aria-busy', state.busy ? 'true' : 'false');
   updateHeader();
   let content;
-  if (!state.task && state.busy) content = `${requestCard()}${isDeveloperMode() ? developerWalletPanel() : ''}${pendingRun()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
-  else if (!state.task) content = `${requestCard()}${isDeveloperMode() ? developerWalletPanel() : ''}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
+  if (!state.task && state.busy) content = `${requestCard()}${isDeveloperMode() ? developerResourcesPanel() : ''}${pendingRun()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
+  else if (!state.task) content = `${requestCard()}${isDeveloperMode() ? developerResourcesPanel() : ''}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
   else content = `${runView(state.task)}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
   app.innerHTML = content;
   bindEvents();
@@ -680,11 +736,10 @@ async function loadReviewer(taskId) {
 
 async function loadTaskEvidence(taskId) {
   await loadAudit(taskId);
-  const walletDetails = await api('/api/wallet');
-  state.wallet = walletDetails.wallet || state.wallet;
-  state.walletTopups = walletDetails.topups || state.walletTopups;
-  state.walletAudit = walletDetails.audit || state.walletAudit;
-  state.ledger = walletDetails.ledger || [];
+  const resourceDetails = await api('/api/simulation/resources');
+  state.simulationResources = resourceDetails.simulationResources || state.simulationResources;
+  state.wallet = state.simulationResources?.wallet || state.wallet;
+  state.walletTopups = state.simulationResources?.wallet?.topups || state.walletTopups;
   if (isDeveloperMode()) await loadReviewer(taskId);
 }
 
@@ -703,8 +758,9 @@ async function refresh() {
   const payload = await api('/api/tasks');
   state.tasks = payload.tasks || [];
   state.funding = payload.funding || state.funding;
-  state.wallet = payload.wallet || state.wallet;
-  state.walletTopups = payload.walletTopups || state.walletTopups;
+  state.simulationResources = payload.simulationResources || state.simulationResources;
+  state.wallet = state.simulationResources?.wallet || payload.wallet || state.wallet;
+  state.walletTopups = state.simulationResources?.wallet?.topups || payload.walletTopups || state.walletTopups;
   state.walletAudit = payload.walletAudit || state.walletAudit;
   state.discovery = payload.discovery || state.discovery;
   if (state.task) {
@@ -852,8 +908,9 @@ async function createSimulatedTopUp(event) {
   render();
   try {
     const payload = await api('/api/wallet/simulated-top-up', { method: 'POST', headers: { 'Idempotency-Key': actionKey, 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify({ amount, currency: 'XSGD' }) });
-    state.wallet = payload.wallet || state.wallet;
-    state.walletTopups = payload.topups || state.walletTopups;
+    state.simulationResources = payload.simulationResources || state.simulationResources;
+    state.wallet = state.simulationResources?.wallet || payload.wallet || state.wallet;
+    state.walletTopups = state.simulationResources?.wallet?.topups || payload.topups || state.walletTopups;
     state.walletAudit = payload.audit || state.walletAudit;
     state.ledger = payload.ledger || state.ledger;
     state.topUpNotice = payload.replayed ? `Replay safe: ${formatMoney(payload.topup?.amountMinor, 'XSGD')} was already recorded for this action.` : `Added ${formatMoney(payload.topup?.amountMinor, 'XSGD')} to the simulated wallet.`;
@@ -866,6 +923,45 @@ async function createSimulatedTopUp(event) {
     state.busy = false;
     render();
     document.querySelector('#top-up-notice')?.focus?.({ preventScroll: true });
+  }
+}
+
+async function createSimulatedRestock(event) {
+  event.preventDefault();
+  if (state.busy) return;
+  const form = event.currentTarget;
+  const sku = form.elements.sku.value;
+  const quantity = form.elements.quantity.value.trim();
+  const validationError = restockQuantityError(quantity);
+  state.restockError = validationError || null;
+  state.restockNotice = null;
+  state.restockSku = sku;
+  if (validationError) {
+    render();
+    document.querySelector('#restock-error')?.focus?.({ preventScroll: true });
+    return;
+  }
+  const actionKey = restockActionKey(sku, quantity);
+  state.busy = true;
+  render();
+  try {
+    const payload = await api('/api/simulation/resources/restock', { method: 'POST', headers: { 'Idempotency-Key': actionKey, 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify({ sku, quantity }) });
+    state.simulationResources = payload.simulationResources || state.simulationResources;
+    state.wallet = state.simulationResources?.wallet || state.wallet;
+    state.walletTopups = state.simulationResources?.wallet?.topups || state.walletTopups;
+    const restock = payload.restock || {};
+    state.restockNotice = payload.replayed
+      ? `Replay safe: ${restock.item || 'The simulated item'} was already restocked; available stock is now ${restock.availableAfterQuantity}.`
+      : `Restocked ${restock.item || 'the simulated item'}: available stock ${restock.availableBeforeQuantity} → ${restock.availableAfterQuantity}.`;
+    state.restockError = null;
+    clearPendingRestockAction(actionKey);
+    form.reset();
+  } catch (error) {
+    state.restockError = error.message;
+  } finally {
+    state.busy = false;
+    render();
+    document.querySelector('#restock-notice')?.focus?.({ preventScroll: true });
   }
 }
 
@@ -942,12 +1038,15 @@ async function resetSandbox() {
     state.reviewerError = null;
     state.audit = [];
     state.ledger = [];
-    state.wallet = payload.wallet || state.wallet;
-    state.walletTopups = payload.walletTopups || [];
+    state.simulationResources = payload.simulationResources || state.simulationResources;
+    state.wallet = state.simulationResources?.wallet || payload.wallet || state.wallet;
+    state.walletTopups = state.simulationResources?.wallet?.topups || payload.walletTopups || [];
     state.walletAudit = payload.walletAudit || [];
     state.funding = payload.funding || state.funding;
     state.topUpError = null;
     state.topUpNotice = null;
+    state.restockError = null;
+    state.restockNotice = null;
     state.targetSite = '';
     state.request = '';
   } catch (error) {
@@ -1014,6 +1113,17 @@ function bindEvents() {
     const input = document.querySelector('#top-up-amount');
     if (input) { input.value = button.dataset.topUpPreset; input.focus(); }
   }));
+  document.querySelector('#restock-form')?.addEventListener('submit', createSimulatedRestock);
+  document.querySelector('#restock-sku')?.addEventListener('change', (event) => {
+    state.restockSku = event.currentTarget.value;
+    state.restockError = null;
+    render();
+    document.querySelector('#restock-quantity')?.focus?.({ preventScroll: true });
+  });
+  document.querySelectorAll('[data-restock-preset]').forEach((button) => button.addEventListener('click', () => {
+    const input = document.querySelector('#restock-quantity');
+    if (input) { input.value = button.dataset.restockPreset; input.focus(); }
+  }));
   document.querySelector('#funding-form')?.addEventListener('submit', createFunding);
   document.querySelectorAll('[data-example]').forEach((button) => button.addEventListener('click', () => {
     state.request = button.dataset.example;
@@ -1048,8 +1158,9 @@ async function boot() {
   try {
     const payload = await api('/api/tasks');
     state.tasks = payload.tasks || [];
-    state.wallet = payload.wallet || null;
-    state.walletTopups = payload.walletTopups || [];
+    state.simulationResources = payload.simulationResources || null;
+    state.wallet = state.simulationResources?.wallet || payload.wallet || null;
+    state.walletTopups = state.simulationResources?.wallet?.topups || payload.walletTopups || [];
     state.walletAudit = [];
     state.funding = payload.funding || null;
     state.discovery = payload.discovery || null;

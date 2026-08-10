@@ -43,6 +43,9 @@ const { createModelGateway, DeterministicFallbackGateway, ModelGatewayError } = 
 const SANDBOX_MODE = 'simulated local sandbox';
 const DEFAULT_ADAPTER_TIMEOUT_MS = 5000;
 const TASK_CEILING_MINOR = 100000;
+const SIMULATION_RESOURCE_PROJECTION_VERSION = 1;
+const SIMULATION_RESTOCK_MAX_QUANTITY = 100;
+const SIMULATION_RESTOCK_MAX_AVAILABLE_QUANTITY = 1000;
 const DEMO_WALLET = Object.freeze({
   id: 'wallet-demo-customer',
   name: 'NaviPay Demo Wallet',
@@ -459,7 +462,8 @@ class SandboxDomainError extends Error {
 
 /** Canonical local adapter: request interpretation and catalog discovery. */
 class LocalDiscoveryAdapter {
-  constructor({ clock = () => new Date(), catalog = CATALOG, timeoutMs = DEFAULT_ADAPTER_TIMEOUT_MS } = {}) {
+  constructor({ store = null, clock = () => new Date(), catalog = CATALOG, timeoutMs = DEFAULT_ADAPTER_TIMEOUT_MS } = {}) {
+    this.store = store;
     this.clock = clock;
     this.catalog = catalog;
     this.timeoutMs = timeoutMs;
@@ -490,7 +494,8 @@ class LocalDiscoveryAdapter {
         relevanceScore += matches.length * 5;
         if (!relevanceScore) return null;
         const forcedOutOfStock = ['out-of-stock', 'exact-out-of-stock'].includes(scenario);
-        const stockQuantity = forcedOutOfStock ? 0 : entry.quantity;
+        const persistedInventory = this.store?.data?.inventory?.[inventoryKey(entry)];
+        const stockQuantity = forcedOutOfStock ? 0 : persistedInventory?.availableQuantity ?? entry.quantity;
         const totalMinor = entry.priceMinor + entry.shippingMinor + entry.taxMinor;
         return {
           id: `candidate-${entry.sku}`,
@@ -1155,6 +1160,44 @@ function safeWalletTopup(topup) {
     createdAt: topup.createdAt,
     completedAt: topup.completedAt,
     disclosure: 'Local simulated funds only. This record does not represent real money, a provider deposit, or blockchain activity.'
+  };
+}
+
+function safeInventoryResource(entry, inventory) {
+  return {
+    sku: entry.sku,
+    variantId: entry.variantId,
+    item: entry.item,
+    variant: entry.variant,
+    brand: entry.brand,
+    productCategory: entry.productCategory,
+    merchantId: entry.merchantId,
+    merchant: entry.merchant,
+    currency: CURRENCY,
+    availableQuantity: Number.isSafeInteger(inventory?.availableQuantity) ? inventory.availableQuantity : 0,
+    reservedQuantity: Number.isSafeInteger(inventory?.reservedQuantity) ? inventory.reservedQuantity : 0,
+    mode: 'local_simulation',
+    disclosure: 'Seeded simulated inventory only. It is not live merchant stock.'
+  };
+}
+
+function safeInventoryRestock(restock) {
+  if (!restock) return null;
+  return {
+    id: restock.id,
+    status: restock.status,
+    sku: restock.sku,
+    item: restock.item,
+    merchant: restock.merchant,
+    quantityAdded: restock.quantityAdded,
+    availableBeforeQuantity: restock.availableBeforeQuantity,
+    availableAfterQuantity: restock.availableAfterQuantity,
+    operationId: safeReference(restock.operationId),
+    reference: safeReference(restock.reference),
+    mode: 'local_simulation',
+    createdAt: restock.createdAt,
+    completedAt: restock.completedAt,
+    disclosure: 'Simulated stock replenishment only. It does not represent live merchant inventory.'
   };
 }
 
@@ -1968,7 +2011,7 @@ class NaviPaySandboxService {
     this.agentRegistry = new AllowlistedToolRegistry();
     this.agentPolicy = new AgentPolicyEngine({ registry: this.agentRegistry });
     seedSandbox(store, clock);
-    const localDiscovery = new LocalDiscoveryAdapter({ clock });
+    const localDiscovery = new LocalDiscoveryAdapter({ store, clock });
     this.localDiscoveryAdapter = localDiscovery;
     this.discoveryAdapter = adapters.discovery || createConfiguredDiscoveryAdapter({ clock, fallback: localDiscovery, catalog: CATALOG });
     this.fundingAdapter = adapters.funding || new LocalFundingAdapter({ store, clock });
@@ -2424,6 +2467,27 @@ class NaviPaySandboxService {
     };
   }
 
+  getSimulationResourcesProjection() {
+    const inventory = CATALOG.map((entry) => safeInventoryResource(entry, this.store.data.inventory[inventoryKey(entry)]));
+    const restocks = Object.values(this.store.data.inventoryRestocks || {})
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, 20)
+      .map(safeInventoryRestock);
+    return {
+      version: SIMULATION_RESOURCE_PROJECTION_VERSION,
+      name: 'Simulation resources',
+      mode: 'local_simulation',
+      disclosure: 'Simulation resources only - fake XSGD balance and seeded local inventory. No real funds or live stock are used.',
+      wallet: { ...publicWallet(this.store.data.wallets[DEMO_WALLET.id]), topups: this.getWalletTopups() },
+      inventory,
+      restocks,
+      limits: {
+        restockMaxQuantity: SIMULATION_RESTOCK_MAX_QUANTITY,
+        restockMaxAvailableQuantity: SIMULATION_RESTOCK_MAX_AVAILABLE_QUANTITY
+      }
+    };
+  }
+
   getWallet() {
     return publicWallet(this.store.data.wallets[DEMO_WALLET.id]);
   }
@@ -2453,7 +2517,7 @@ class NaviPaySandboxService {
     const previous = this._readIdempotency(key, fingerprint);
     if (previous?.response) {
       const replay = clone(previous.response);
-      replay.body = { ...replay.body, wallet: this.getWallet(), ledger: this.getWalletLedger(), topups: this.getWalletTopups(), audit: this.getWalletAudit() };
+      replay.body = { ...replay.body, simulationResources: this.getSimulationResourcesProjection(), wallet: this.getWallet(), ledger: this.getWalletLedger(), topups: this.getWalletTopups(), audit: this.getWalletAudit() };
       return { ...replay, replayed: true };
     }
     let normalizedAmount;
@@ -2498,10 +2562,109 @@ class NaviPaySandboxService {
       statusCode: 201,
       body: {
         topup: safeWalletTopup(topup),
+        simulationResources: this.getSimulationResourcesProjection(),
         wallet: this.getWallet(),
         ledger: this.getWalletLedger(),
         topups: this.getWalletTopups(),
         audit: this.getWalletAudit()
+      },
+      replayed: false
+    };
+    this.store.transaction((data) => { data.idempotency[key] = { ...data.idempotency[key], response: clone(response) }; });
+    return response;
+  }
+
+  restockSimulationInventory({ idempotencyKey, sku, quantity } = {}) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) {
+      throw new SandboxDomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key for simulated inventory restock.');
+    }
+    const fingerprint = JSON.stringify({ sku, quantity });
+    const key = `sandbox:inventory:restock:${idempotencyKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) {
+      const replay = clone(previous.response);
+      replay.body = { ...replay.body, simulationResources: this.getSimulationResourcesProjection() };
+      return { ...replay, replayed: true };
+    }
+    if (typeof sku !== 'string' || !sku.trim()) {
+      throw new SandboxDomainError(422, 'UNKNOWN_CATALOG_ITEM', 'Choose a seeded catalog item to restock.');
+    }
+    const entry = CATALOG.find((candidate) => candidate.sku === sku);
+    if (!entry) {
+      throw new SandboxDomainError(422, 'UNKNOWN_CATALOG_ITEM', 'That item is not in the seeded local catalog.');
+    }
+    let normalizedQuantity;
+    if (typeof quantity === 'number') {
+      normalizedQuantity = Number.isSafeInteger(quantity) ? quantity : null;
+    } else if (typeof quantity === 'string' && /^[0-9]+$/.test(quantity)) {
+      normalizedQuantity = Number(quantity);
+    } else {
+      normalizedQuantity = null;
+    }
+    if (!Number.isSafeInteger(normalizedQuantity) || normalizedQuantity < 1) {
+      throw new SandboxDomainError(422, 'INVALID_RESTOCK_QUANTITY', 'Restock quantity must be a positive whole number.');
+    }
+    if (normalizedQuantity > SIMULATION_RESTOCK_MAX_QUANTITY) {
+      throw new SandboxDomainError(422, 'RESTOCK_QUANTITY_LIMIT', `Restock quantity cannot exceed ${SIMULATION_RESTOCK_MAX_QUANTITY} units per action.`);
+    }
+    const inventoryKeyValue = inventoryKey(entry);
+    const inventory = this.store.data.inventory[inventoryKeyValue];
+    if (!inventory) throw new SandboxDomainError(503, 'INVENTORY_UNAVAILABLE', 'The seeded local inventory is not available.');
+    const availableBeforeQuantity = inventory.availableQuantity;
+    if (availableBeforeQuantity + normalizedQuantity > SIMULATION_RESTOCK_MAX_AVAILABLE_QUANTITY) {
+      throw new SandboxDomainError(422, 'RESTOCK_CAPACITY_EXCEEDED', `Available simulated stock cannot exceed ${SIMULATION_RESTOCK_MAX_AVAILABLE_QUANTITY} units.`);
+    }
+    const createdAt = now(this.clock);
+    const id = `simulated_restock_${crypto.randomUUID()}`;
+    const operationId = `op_${id}`;
+    const reference = stableReference('SIM-RESTOCK', idempotencyKey);
+    const restock = {
+      id,
+      operationId,
+      actionKey: idempotencyKey,
+      status: 'restocked',
+      sku: entry.sku,
+      item: entry.item,
+      merchant: entry.merchant,
+      quantityAdded: normalizedQuantity,
+      availableBeforeQuantity,
+      availableAfterQuantity: availableBeforeQuantity + normalizedQuantity,
+      reference,
+      createdAt,
+      completedAt: createdAt,
+      mode: 'local_simulation'
+    };
+    this.store.transaction((data) => {
+      const currentInventory = data.inventory[inventoryKeyValue];
+      currentInventory.availableQuantity += normalizedQuantity;
+      data.inventoryRestocks[id] = restock;
+      data.operations[operationId] = {
+        id: operationId,
+        taskId: null,
+        stage: 'simulation_resources',
+        status: 'completed',
+        reference,
+        attempts: 1,
+        startedAt: createdAt,
+        completedAt: createdAt,
+        updatedAt: createdAt
+      };
+      this._audit(data, null, 'inventory.restock', 'success', 'Simulated inventory was restocked in local developer mode.', {
+        operationId,
+        reference,
+        sku: entry.sku,
+        quantityAdded: normalizedQuantity,
+        availableBeforeQuantity,
+        availableAfterQuantity: currentInventory.availableQuantity,
+        mode: 'local_simulation'
+      });
+      data.idempotency[key] = { restockId: id, requestFingerprint: fingerprint, createdAt, response: null };
+    });
+    const response = {
+      statusCode: 201,
+      body: {
+        restock: safeInventoryRestock(restock),
+        simulationResources: this.getSimulationResourcesProjection()
       },
       replayed: false
     };
@@ -4030,7 +4193,7 @@ class NaviPaySandboxService {
   reset() {
     this.store.reset();
     seedSandbox(this.store, this.clock);
-    return { wallet: this.getWallet(), walletTopups: this.getWalletTopups(), walletAudit: this.getWalletAudit(), tasks: [], funding: this.getFundingProjection() };
+    return { simulationResources: this.getSimulationResourcesProjection(), wallet: this.getWallet(), walletTopups: this.getWalletTopups(), walletAudit: this.getWalletAudit(), tasks: [], funding: this.getFundingProjection() };
   }
 }
 

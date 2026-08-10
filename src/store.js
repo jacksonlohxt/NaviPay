@@ -17,6 +17,7 @@ function emptyState() {
     merchantBalances: {},
     merchantCredits: {},
     inventory: {},
+    inventoryRestocks: {},
     reservations: {},
     orders: {},
     deliveries: {},
@@ -74,6 +75,7 @@ function validateState(value, filePath = 'store') {
   ensureCollection(state, 'merchantBalances', 'object');
   ensureCollection(state, 'merchantCredits', 'object');
   ensureCollection(state, 'inventory', 'object');
+  ensureCollection(state, 'inventoryRestocks', 'object');
   ensureCollection(state, 'reservations', 'object');
   ensureCollection(state, 'orders', 'object');
   ensureCollection(state, 'deliveries', 'object');

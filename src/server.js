@@ -56,8 +56,12 @@ function idempotencyKey(req, fallback) {
   return req.headers['idempotency-key'] || fallback;
 }
 
+function isLoopbackAddress(address) {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
 function localSimulationAuthorized(req) {
-  return req.headers['x-navipay-local-simulation'] === 'true';
+  return req.headers['x-navipay-local-simulation'] === 'true' && isLoopbackAddress(req.socket?.remoteAddress);
 }
 
 function secretMatches(candidate, configured) {
@@ -186,9 +190,20 @@ function routeSandboxApi(service, req, res, url) {
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'discovery' && method === 'GET') {
     return json(res, 200, { discovery: service.getDiscoveryProjection() });
   }
+  if (segments.length === 3 && segments[0] === 'api' && segments[1] === 'simulation' && segments[2] === 'resources' && method === 'GET') {
+    return json(res, 200, { simulationResources: service.getSimulationResourcesProjection() });
+  }
+  if (segments.length === 4 && segments[0] === 'api' && segments[1] === 'simulation' && segments[2] === 'resources' && segments[3] === 'restock' && method === 'POST') {
+    if (!localSimulationAuthorized(req)) throw new SandboxDomainError(403, 'LOCAL_SIMULATION_ONLY', 'This route is reserved for the explicit local inventory simulation path.');
+    return readBody(req).then((body) => {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SandboxDomainError(400, 'INVALID_SIMULATED_RESTOCK', 'Simulated inventory restock input must be a JSON object.');
+      const result = service.restockSimulationInventory({ idempotencyKey: idempotencyKey(req, null), sku: body.sku, quantity: body.quantity });
+      return json(res, result.statusCode, { ...result.body, replayed: result.replayed });
+    });
+  }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'GET') {
     const tasks = service.listTasks();
-    return json(res, 200, { tasks, projections: tasks.map((task) => service.getTaskProjection(task.id)), wallet: service.getWallet(), walletTopups: service.getWalletTopups(), walletAudit: service.getWalletAudit(), funding: service.getFundingProjection(), discovery: service.getDiscoveryProjection(), mode: 'simulated local sandbox' });
+    return json(res, 200, { tasks, projections: tasks.map((task) => service.getTaskProjection(task.id)), simulationResources: service.getSimulationResourcesProjection(), wallet: service.getWallet(), walletTopups: service.getWalletTopups(), walletAudit: service.getWalletAudit(), funding: service.getFundingProjection(), discovery: service.getDiscoveryProjection(), mode: 'simulated local sandbox' });
   }
   if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'tasks' && method === 'POST') {
     return readBody(req).then((body) => {
