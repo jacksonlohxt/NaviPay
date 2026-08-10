@@ -13,6 +13,7 @@ function emptyState() {
     wallets: {},
     walletLedger: [],
     walletTransfers: {},
+    walletTopups: {},
     merchantBalances: {},
     merchantCredits: {},
     inventory: {},
@@ -69,6 +70,7 @@ function validateState(value, filePath = 'store') {
   ensureCollection(state, 'wallets', 'object');
   ensureCollection(state, 'walletLedger', 'array');
   ensureCollection(state, 'walletTransfers', 'object');
+  ensureCollection(state, 'walletTopups', 'object');
   ensureCollection(state, 'merchantBalances', 'object');
   ensureCollection(state, 'merchantCredits', 'object');
   ensureCollection(state, 'inventory', 'object');

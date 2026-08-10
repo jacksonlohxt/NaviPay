@@ -92,6 +92,7 @@ async function main() {
   assert.match(text, /Customer/);
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=customer]")?.getAttribute("aria-pressed")']), /true/);
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /false/);
+  assert.doesNotMatch(text, /Simulated wallet|Add simulated funds|Amount in XSGD/);
   assertDefaultSurface(text, 'idle');
 
   // Hold the request long enough to assert the running state as a real user would see it.
@@ -132,14 +133,35 @@ async function main() {
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /true/);
   assert.match(runChrome(['eval', '() => !/PAN|CVV|private key|rawProviderPayload|credentials\\s*:/i.test(document.body.textContent)']), /true/);
   assert.match(runChrome(['eval', '() => localStorage.getItem("navipay.presentation-mode")']), /developer/);
+  assert.match(runChrome(['eval', '() => JSON.stringify({label: Boolean(document.querySelector("label[for=top-up-amount]")), described: Boolean(document.querySelector("#top-up-amount[aria-describedby]")), noOverflow: document.documentElement.scrollWidth <= window.innerWidth})']), /label.*true/);
+  assert.match(runChrome(['eval', '() => JSON.stringify({label: Boolean(document.querySelector("label[for=top-up-amount]")), described: Boolean(document.querySelector("#top-up-amount[aria-describedby]")), noOverflow: document.documentElement.scrollWidth <= window.innerWidth})']), /described.*true/);
+
+  // Developer-only simulated funding validates input, credits the server wallet, and survives refresh.
+  runChrome(['eval', '() => { const input = document.querySelector("#top-up-amount"); input.value = "0.00"; document.querySelector("#top-up-form").requestSubmit(); return "invalid-top-up"; }']);
+  text = waitForText(/positive XSGD amount|simulated amount must be greater than zero/i);
+  assert.match(text, /positive XSGD amount|simulated amount must be greater than zero/i);
+  assert.doesNotMatch(text, /Added XSGD/);
+  runChrome(['eval', `() => { document.querySelector('[data-top-up-preset="25.00"]').click(); document.querySelector('#top-up-form').requestSubmit(); return 'top-up-submitted'; }`]);
+  text = waitForText(/Added XSGD 25\.00/);
+  assert.match(text, /XSGD 25\.00/);
+  assert.match(text, /Latest local top-up/i);
+  runChrome(['eval', '() => { location.reload(); return "reloading-top-up"; }']);
+  text = waitForText(/Latest local top-up/i);
+  assert.match(text, /XSGD 25\.00/);
+  runChrome(['resize', '390', '844']);
+  assert.match(runChrome(['eval', '() => document.documentElement.scrollWidth <= window.innerWidth ? "top-up-narrow-ok" : "overflow"']), /top-up-narrow-ok/);
+  runChrome(['resize', '1440', '1000']);
+  const duplicateTopUp = await post('/api/wallet/simulated-top-up', { amount: '10.00', currency: 'XSGD' }, { 'Idempotency-Key': 'ui-runner-duplicate-top-up', 'X-NaviPay-Local-Simulation': 'true' });
+  const duplicateTopUpReplay = await post('/api/wallet/simulated-top-up', { amount: '10.00', currency: 'XSGD' }, { 'Idempotency-Key': 'ui-runner-duplicate-top-up', 'X-NaviPay-Local-Simulation': 'true' });
+  assert.equal(duplicateTopUp.response.status, 201);
+  assert.equal(duplicateTopUpReplay.response.status, 201);
+  assert.equal(duplicateTopUpReplay.payload.replayed, true);
 
   // The presentation preference survives a refresh, and customer mode remains one click away.
-  runChrome(['eval', '() => { location.reload(); return "reloading-developer"; }']);
-  text = waitForText(/Developer evidence/);
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /true/);
   runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=customer]").click(); return "customer-selected"; }']);
   text = waitForText(/Customer view/);
-  assert.doesNotMatch(text, /Developer evidence|Quote ID|KYC|recorded replay/i);
+  assert.doesNotMatch(text, /Developer evidence|Quote ID|KYC|recorded replay|Simulated wallet|Add simulated funds/i);
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=customer]")?.getAttribute("aria-pressed")']), /true/);
 
   // The payment drawer is secondary, human-facing, safe, and keyboard dismissible.
@@ -229,6 +251,27 @@ async function main() {
     assert.doesNotMatch(text, /Your purchase|What happens next|ORDER STATUS|Purchase progress/, label);
     assertDefaultSurface(text, label);
   }
+
+  // A developer top-up recovers a canonical purchase after a terminal insufficient-funds result.
+  await resetAndOpen();
+  await post('/api/purchases/run', { request: 'buy an Apple Magic Keyboard', scenario: 'insufficient-funds' }, { 'Idempotency-Key': `ui-top-up-insufficient-${process.pid}` });
+  runChrome(['open', baseUrl]);
+  text = pageText();
+  assert.match(text, /Not enough balance/);
+  assert.match(text, /No payment/);
+  runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=developer]").click(); return "developer-top-up"; }']);
+  text = waitForText(/Simulated wallet/);
+  assert.match(text, /XSGD 500\.00/);
+  assert.match(runChrome(['eval', '() => document.documentElement.scrollWidth <= window.innerWidth ? "top-up-no-overflow" : "overflow"']), /top-up-no-overflow/);
+  runChrome(['eval', '() => { const input = document.querySelector("#top-up-amount"); input.value = "250.00"; document.querySelector("#top-up-form").requestSubmit(); return "recovery-top-up"; }']);
+  text = waitForText(/Added XSGD 250\.00/);
+  assert.match(text, /XSGD 750\.00/);
+  runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=customer]").click(); return "customer-recovery"; }']);
+  waitForText(/Customer view/);
+  runChrome(['eval', '() => { document.querySelector("[data-new-purchase]").click(); document.querySelector("#request-input").value = "buy an Apple Magic Keyboard"; document.querySelector("#request-form").requestSubmit(); return "canonical-recovery-purchase"; }']);
+  text = waitForText(/Purchase delivered/);
+  assert.match(text, /Purchase confirmed/);
+  assert.doesNotMatch(text, /Not enough balance/);
 
   // Unknown payment survives a reload, then uses the authoritative idempotent reconciliation route.
   await resetAndOpen();

@@ -1,5 +1,8 @@
 // Acceptance track: shared canonical state and projection presentation preference.
 const PRESENTATION_MODE_STORAGE_KEY = 'navipay.presentation-mode';
+const TOP_UP_PENDING_ACTION_KEY = 'navipay.simulated-top-up.pending-action';
+const TOP_UP_PRESETS = Object.freeze(['10.00', '25.00', '100.00', '250.00']);
+const TOP_UP_MAX_MINOR = 100000000;
 const PRESENTATION_MODES = Object.freeze(['customer', 'developer']);
 
 function readPresentationMode() {
@@ -31,6 +34,9 @@ const state = {
   reviewerError: null,
   discovery: null,
   funding: null,
+  wallet: null,
+  walletTopups: [],
+  walletAudit: [],
   ledger: [],
   audit: [],
   busy: false,
@@ -40,7 +46,9 @@ const state = {
   mode: readPresentationMode(),
   drawerOpen: false,
   drawerTrigger: null,
-  pendingRequest: ''
+  pendingRequest: '',
+  topUpError: null,
+  topUpNotice: null
 };
 
 const app = document.querySelector('#app');
@@ -56,6 +64,34 @@ function formatMoney(minor, currency = 'XSGD') {
 
 function formatSnapshotMoney(minor, currency = 'XSGD', fallback = 'No task snapshot') {
   return Number.isFinite(minor) ? formatMoney(minor, currency) : fallback;
+}
+
+function readPendingTopUpAction(amount) {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(TOP_UP_PENDING_ACTION_KEY) || 'null');
+    return saved?.amount === amount && typeof saved.key === 'string' ? saved.key : null;
+  } catch {
+    return null;
+  }
+}
+
+function topUpActionKey(amount) {
+  const existing = readPendingTopUpAction(amount);
+  if (existing) return existing;
+  const key = `developer-top-up-${window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+  try { window.localStorage.setItem(TOP_UP_PENDING_ACTION_KEY, JSON.stringify({ amount, key })); } catch {
+    // The server still validates the request; persistence is best effort.
+  }
+  return key;
+}
+
+function clearPendingTopUpAction(key) {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(TOP_UP_PENDING_ACTION_KEY) || 'null');
+    if (saved?.key === key) window.localStorage.removeItem(TOP_UP_PENDING_ACTION_KEY);
+  } catch {
+    // A storage restriction should not block a completed local simulation.
+  }
 }
 
 function formatDate(value) {
@@ -482,6 +518,27 @@ function developerAgentDetails(projection) {
   return `<details class="developer-group" open><summary>Agent and simulation provenance <span>Read-only, bounded evidence</span></summary><div class="developer-content"><dl class="detail-list">${provenanceRows}</dl><p class="developer-disclosure">${escapeHtml(agent.disclosure || 'The local server remained authoritative for every side effect.')}</p>${proposalBlock}</div></details>`;
 }
 
+function topUpAmountError(amount) {
+  if (!amount) return 'Enter an XSGD amount first.';
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(amount)) return 'Use a positive XSGD amount with at most two decimal places.';
+  const [whole, fraction = ''] = amount.split('.');
+  const minor = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+  if (!Number.isSafeInteger(minor) || minor < 1) return 'The simulated amount must be greater than zero.';
+  if (minor > TOP_UP_MAX_MINOR) return 'That amount exceeds the local simulation limit of XSGD 1,000,000.00.';
+  return '';
+}
+
+function developerWalletPanel() {
+  const wallet = state.wallet || state.funding?.wallet || {};
+  const topups = state.walletTopups || [];
+  const latest = topups[0] || null;
+  const balance = Number.isFinite(wallet.balanceMinor) ? formatMoney(wallet.balanceMinor, wallet.currency || 'XSGD') : 'Not available';
+  const notice = state.topUpNotice ? `<p id="top-up-notice" class="top-up-notice" role="status" tabindex="-1">${escapeHtml(state.topUpNotice)}</p>` : '';
+  const error = state.topUpError ? `<p id="top-up-error" class="form-error" role="alert">${escapeHtml(state.topUpError)}</p>` : '<p id="top-up-error" class="form-error" role="alert" hidden></p>';
+  const latestRecord = latest ? `<div class="top-up-record" aria-label="Latest simulated top-up"><div><span class="data-label">Latest local top-up</span><strong>${escapeHtml(latest.amount || formatMoney(latest.amountMinor, latest.currency || 'XSGD'))}</strong><small>${escapeHtml(latest.status)} · action ${escapeHtml(latest.actionReference || 'Not available')}</small></div><div><span class="data-label">Transaction record</span><strong>${escapeHtml(latest.transactionReference || 'Not available')}</strong><small>${escapeHtml(latest.mode || 'local_simulation')}</small></div></div>` : '<p class="developer-muted">No simulated top-ups recorded yet.</p>';
+  return `<section class="developer-wallet-panel" aria-labelledby="developer-wallet-title"><div class="developer-evidence-heading"><div><span class="overline">Developer control</span><h2 id="developer-wallet-title">Simulated wallet</h2><p>Use this local-only control to create deterministic balance scenarios. It cannot approve a purchase.</p></div>${modeBadge('Local simulation')}</div><div class="developer-simulation-boundary">LOCAL SIMULATION ONLY - no real funds, provider deposit, or blockchain activity.</div><div class="wallet-control-summary">${dataCell('Available simulated balance', balance, 'Server-owned fake wallet')}${dataCell('Currency', wallet.currency || 'XSGD', 'Only XSGD is supported')}${dataCell('Top-up records', topups.length, 'Persisted local evidence')}</div><form id="top-up-form" novalidate><fieldset><legend>Add simulated funds</legend><p class="developer-muted">Choose a preset or enter a custom XSGD amount. This only credits the local fake wallet.</p><div class="top-up-presets" role="group" aria-label="Simulated XSGD amount presets">${TOP_UP_PRESETS.map((preset) => `<button type="button" class="quiet-button" data-top-up-preset="${preset}"${state.busy ? ' disabled' : ''}>XSGD ${preset}</button>`).join('')}</div><label for="top-up-amount">Amount in XSGD</label><div class="top-up-form-row"><input id="top-up-amount" name="amount" type="text" inputmode="decimal" autocomplete="off" maxlength="20" placeholder="25.00" aria-describedby="top-up-help top-up-error"${state.busy ? ' disabled' : ''}><button type="submit" class="secondary-button"${state.busy ? ' disabled' : ''}>Add simulated funds</button></div><small id="top-up-help" class="developer-muted">Positive XSGD only, up to XSGD 1,000,000.00. Replaying the same action is safe.</small>${error}</fieldset></form>${latestRecord}${notice}<p class="developer-disclosure">Technical record is a local simulation reference. It is not proof of real funds and never includes payment credentials or provider payloads.</p></section>`;
+}
+
 function developerEvidence(task) {
   const projection = taskProjection(task);
   const quote = taskQuote(task);
@@ -564,7 +621,8 @@ function runView(task) {
   const stagePanel = showStages ? `<section class="stage-card"><div class="panel-heading"><div><span class="overline">Purchase progress</span><h2>Purchase to delivery</h2></div><span class="stage-caption">${task.state === 'awaiting_selection' || task.state === 'reconciliation_required' ? 'Action needed below' : 'Updated now'}</span></div>${stageTracker(stages)}</section>` : '';
   const orderCard = hasReceipt ? receiptPanel(task) : attemptedPurchasePanel(task);
   const evidence = isDeveloperMode() ? developerEvidence(task) : advancedDetails(task);
-  return `<section class="run-view"><div class="run-heading"><div><span class="overline">Purchase status</span><h1>${escapeHtml(taskRequest(task))}</h1></div><div class="run-actions">${modeBadge(isDeveloperMode() ? 'Developer view' : 'Customer view')}<button type="button" class="quiet-dark-button" data-new-purchase>New purchase</button></div></div>${outcome(task)}${orderCard}${stagePanel}${taskFacts(task)}${evidence}${historyDetails()}</section>`;
+  const developerPanel = isDeveloperMode() ? developerWalletPanel() : '';
+  return `<section class="run-view"><div class="run-heading"><div><span class="overline">Purchase status</span><h1>${escapeHtml(taskRequest(task))}</h1></div><div class="run-actions">${modeBadge(isDeveloperMode() ? 'Developer view' : 'Customer view')}<button type="button" class="quiet-dark-button" data-new-purchase>New purchase</button></div></div>${outcome(task)}${orderCard}${stagePanel}${taskFacts(task)}${developerPanel}${evidence}${historyDetails()}</section>`;
 }
 
 function updateHeader() {
@@ -580,8 +638,8 @@ function render() {
   app.setAttribute('aria-busy', state.busy ? 'true' : 'false');
   updateHeader();
   let content;
-  if (!state.task && state.busy) content = `${requestCard()}${pendingRun()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
-  else if (!state.task) content = `${requestCard()}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
+  if (!state.task && state.busy) content = `${requestCard()}${isDeveloperMode() ? developerWalletPanel() : ''}${pendingRun()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
+  else if (!state.task) content = `${requestCard()}${isDeveloperMode() ? developerWalletPanel() : ''}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
   else content = `${runView(state.task)}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
   app.innerHTML = content;
   bindEvents();
@@ -623,6 +681,9 @@ async function loadReviewer(taskId) {
 async function loadTaskEvidence(taskId) {
   await loadAudit(taskId);
   const walletDetails = await api('/api/wallet');
+  state.wallet = walletDetails.wallet || state.wallet;
+  state.walletTopups = walletDetails.topups || state.walletTopups;
+  state.walletAudit = walletDetails.audit || state.walletAudit;
   state.ledger = walletDetails.ledger || [];
   if (isDeveloperMode()) await loadReviewer(taskId);
 }
@@ -642,6 +703,9 @@ async function refresh() {
   const payload = await api('/api/tasks');
   state.tasks = payload.tasks || [];
   state.funding = payload.funding || state.funding;
+  state.wallet = payload.wallet || state.wallet;
+  state.walletTopups = payload.walletTopups || state.walletTopups;
+  state.walletAudit = payload.walletAudit || state.walletAudit;
   state.discovery = payload.discovery || state.discovery;
   if (state.task) {
     const current = state.tasks.find((task) => task.id === state.task.id);
@@ -770,6 +834,41 @@ async function refundPayment(action) {
   }
 }
 
+async function createSimulatedTopUp(event) {
+  event.preventDefault();
+  if (state.busy) return;
+  const form = event.currentTarget;
+  const amount = form.elements.amount.value.trim();
+  const validationError = topUpAmountError(amount);
+  state.topUpError = validationError || null;
+  state.topUpNotice = null;
+  if (validationError) {
+    render();
+    document.querySelector('#top-up-error')?.focus?.({ preventScroll: true });
+    return;
+  }
+  const actionKey = topUpActionKey(amount);
+  state.busy = true;
+  render();
+  try {
+    const payload = await api('/api/wallet/simulated-top-up', { method: 'POST', headers: { 'Idempotency-Key': actionKey, 'X-NaviPay-Local-Simulation': 'true' }, body: JSON.stringify({ amount, currency: 'XSGD' }) });
+    state.wallet = payload.wallet || state.wallet;
+    state.walletTopups = payload.topups || state.walletTopups;
+    state.walletAudit = payload.audit || state.walletAudit;
+    state.ledger = payload.ledger || state.ledger;
+    state.topUpNotice = payload.replayed ? `Replay safe: ${formatMoney(payload.topup?.amountMinor, 'XSGD')} was already recorded for this action.` : `Added ${formatMoney(payload.topup?.amountMinor, 'XSGD')} to the simulated wallet.`;
+    state.topUpError = null;
+    clearPendingTopUpAction(actionKey);
+    form.reset();
+  } catch (error) {
+    state.topUpError = error.message;
+  } finally {
+    state.busy = false;
+    render();
+    document.querySelector('#top-up-notice')?.focus?.({ preventScroll: true });
+  }
+}
+
 async function createFunding(event) {
   event.preventDefault();
   if (state.busy) return;
@@ -843,7 +942,12 @@ async function resetSandbox() {
     state.reviewerError = null;
     state.audit = [];
     state.ledger = [];
+    state.wallet = payload.wallet || state.wallet;
+    state.walletTopups = payload.walletTopups || [];
+    state.walletAudit = payload.walletAudit || [];
     state.funding = payload.funding || state.funding;
+    state.topUpError = null;
+    state.topUpNotice = null;
     state.targetSite = '';
     state.request = '';
   } catch (error) {
@@ -905,6 +1009,11 @@ function bindDrawerEvents() {
 
 function bindEvents() {
   document.querySelector('#request-form')?.addEventListener('submit', runPurchase);
+  document.querySelector('#top-up-form')?.addEventListener('submit', createSimulatedTopUp);
+  document.querySelectorAll('[data-top-up-preset]').forEach((button) => button.addEventListener('click', () => {
+    const input = document.querySelector('#top-up-amount');
+    if (input) { input.value = button.dataset.topUpPreset; input.focus(); }
+  }));
   document.querySelector('#funding-form')?.addEventListener('submit', createFunding);
   document.querySelectorAll('[data-example]').forEach((button) => button.addEventListener('click', () => {
     state.request = button.dataset.example;
@@ -939,6 +1048,9 @@ async function boot() {
   try {
     const payload = await api('/api/tasks');
     state.tasks = payload.tasks || [];
+    state.wallet = payload.wallet || null;
+    state.walletTopups = payload.walletTopups || [];
+    state.walletAudit = [];
     state.funding = payload.funding || null;
     state.discovery = payload.discovery || null;
     state.task = state.tasks[0] || null;

@@ -1139,6 +1139,25 @@ function publicWallet(wallet) {
   };
 }
 
+function safeWalletTopup(topup) {
+  if (!topup) return null;
+  return {
+    id: topup.id,
+    status: topup.status,
+    amountMinor: topup.amountMinor,
+    amount: formatFundingAmount(topup.amountMinor),
+    currency: topup.currency,
+    walletId: topup.walletId,
+    operationId: topup.operationId,
+    actionReference: fundingStableReference('SIM-ACTION', topup.actionKey),
+    transactionReference: safeReference(topup.transactionReference),
+    mode: 'local_simulation',
+    createdAt: topup.createdAt,
+    completedAt: topup.completedAt,
+    disclosure: 'Local simulated funds only. This record does not represent real money, a provider deposit, or blockchain activity.'
+  };
+}
+
 function safeKycProfile(profile) {
   if (!profile) return null;
   return {
@@ -2407,6 +2426,87 @@ class NaviPaySandboxService {
 
   getWallet() {
     return publicWallet(this.store.data.wallets[DEMO_WALLET.id]);
+  }
+
+  getWalletTopups() {
+    return Object.values(this.store.data.walletTopups || {})
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map(safeWalletTopup);
+  }
+
+  getWalletAudit() {
+    return this.store.data.auditEvents
+      .filter((event) => event.type === 'wallet.top_up')
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+      .map(projectAuditEvent);
+  }
+
+  addSimulatedFunds({ idempotencyKey, amount, amountMinor, asset = FUNDING_ASSET } = {}) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) {
+      throw new SandboxDomainError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Provide an Idempotency-Key for simulated wallet funding.');
+    }
+    if (asset !== FUNDING_ASSET) {
+      throw new SandboxDomainError(422, 'UNSUPPORTED_CURRENCY', 'Simulated wallet funding accepts XSGD only.');
+    }
+    const fingerprint = JSON.stringify({ amount, amountMinor, asset, walletId: DEMO_WALLET.id });
+    const key = `sandbox:wallet:top-up:${idempotencyKey}`;
+    const previous = this._readIdempotency(key, fingerprint);
+    if (previous?.response) {
+      const replay = clone(previous.response);
+      replay.body = { ...replay.body, wallet: this.getWallet(), ledger: this.getWalletLedger(), topups: this.getWalletTopups(), audit: this.getWalletAudit() };
+      return { ...replay, replayed: true };
+    }
+    let normalizedAmount;
+    try {
+      normalizedAmount = normalizeAmountMinor({ amount, amountMinor });
+    } catch (error) {
+      throw new SandboxDomainError(422, error.code || 'MALFORMED_AMOUNT', error.message);
+    }
+    const wallet = this.store.data.wallets[DEMO_WALLET.id];
+    if (!wallet || wallet.status !== 'active' || wallet.currency !== FUNDING_ASSET) {
+      throw new SandboxDomainError(503, 'FUNDING_WALLET_UNAVAILABLE', 'The fake wallet is not available for simulated funding.');
+    }
+    const createdAt = now(this.clock);
+    const id = `simulated_topup_${crypto.randomUUID()}`;
+    const operationId = `op_${id}`;
+    const transactionReference = fundingStableReference('SIM-TOPUP-TX', idempotencyKey);
+    const topup = {
+      id,
+      walletId: wallet.id,
+      status: 'credited',
+      amountMinor: normalizedAmount,
+      currency: FUNDING_ASSET,
+      operationId,
+      actionKey: idempotencyKey,
+      transactionReference,
+      createdAt,
+      completedAt: createdAt,
+      mode: 'local_simulation'
+    };
+    this.store.transaction((data) => {
+      const currentWallet = data.wallets[wallet.id];
+      currentWallet.balanceMinor += normalizedAmount;
+      data.walletTopups[id] = topup;
+      data.walletLedger.push(
+        { id: `${transactionReference}:source`, transactionReference, operationId, topupId: id, kind: 'simulation_top_up', entry: 'debit', accountId: 'operator:local-simulation', amountMinor: normalizedAmount, currency: FUNDING_ASSET, occurredAt: createdAt },
+        { id: `${transactionReference}:wallet`, transactionReference, operationId, topupId: id, kind: 'simulation_top_up', entry: 'credit', accountId: wallet.id, amountMinor: normalizedAmount, currency: FUNDING_ASSET, occurredAt: createdAt }
+      );
+      this._audit(data, null, 'wallet.top_up', 'success', 'Simulated funds added to the fake wallet in local developer mode.', { operationId, reference: transactionReference, topupId: id, amountMinor: normalizedAmount, currency: FUNDING_ASSET, mode: 'local_simulation' });
+      data.idempotency[key] = { topupId: id, requestFingerprint: fingerprint, createdAt, response: null };
+    });
+    const response = {
+      statusCode: 201,
+      body: {
+        topup: safeWalletTopup(topup),
+        wallet: this.getWallet(),
+        ledger: this.getWalletLedger(),
+        topups: this.getWalletTopups(),
+        audit: this.getWalletAudit()
+      },
+      replayed: false
+    };
+    this.store.transaction((data) => { data.idempotency[key] = { ...data.idempotency[key], response: clone(response) }; });
+    return response;
   }
 
   getKycStatus() {
@@ -3930,7 +4030,7 @@ class NaviPaySandboxService {
   reset() {
     this.store.reset();
     seedSandbox(this.store, this.clock);
-    return { wallet: this.getWallet(), tasks: [], funding: this.getFundingProjection() };
+    return { wallet: this.getWallet(), walletTopups: this.getWalletTopups(), walletAudit: this.getWalletAudit(), tasks: [], funding: this.getFundingProjection() };
   }
 }
 
