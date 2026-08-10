@@ -430,7 +430,9 @@ status codes, and errors. Send `Idempotency-Key` on every mutating request.
 | Payment reverse    | `POST /api/tasks/:id/payment/reverse`   |
 | Funding and KYC    | `/api/funding` and `/api/funding/kyc`   |
 | Catalog and wallet | `/api/catalog` and `/api/wallet`        |
+| Simulation resources | `GET /api/simulation/resources`       |
 | Developer top-up  | `POST /api/wallet/simulated-top-up`     |
+| Developer restock | `POST /api/simulation/resources/restock` |
 | Reset              | `POST /api/reset`                       |
 | Optional discovery | `/api/discovery` and `targetSite`       |
 
@@ -453,14 +455,29 @@ Contract notes:
 - `targetSite` is optional on the purchase run. The server validates its URL and
   allowlist before the bounded browser worker can read it. The worker never gets
   payment or checkout authority.
-- Developer mode exposes **Add simulated funds** for local scenario setup. The
-  control calls `POST /api/wallet/simulated-top-up` with a stable
+- Developer mode exposes a **Simulation resources** surface for local scenario
+  setup. It groups the fake XSGD wallet with the seeded sandbox inventory while
+  Customer mode renders neither the surface nor its controls. The name describes
+  both replenishable local inputs without implying custody or live merchant
+  access. The surface is a presentation preference, not authentication,
+  authorization, or purchase approval.
+- The wallet control calls `POST /api/wallet/simulated-top-up` with a stable
   `Idempotency-Key` and `X-NaviPay-Local-Simulation: true`. It accepts XSGD only,
   credits the server-owned fake wallet through balanced local ledger legs, and
   records a safe top-up reference and audit event. It never starts or approves a
-  purchase; use the canonical purchase route afterward. Customer mode does not
-  render this control. Invalid, zero, negative, malformed, or over-limit amounts
-  are rejected by the server.
+  purchase; use the canonical purchase route afterward. Invalid, zero, negative,
+  malformed, or over-limit amounts are rejected by the server.
+- `GET /api/simulation/resources` is the canonical safe projection for the fake
+  wallet and seeded inventory. Developer restock calls
+  `POST /api/simulation/resources/restock` with `{ "sku": "...", "quantity": 5 }`,
+  the explicit local simulation header, and an idempotency key. The SKU must be a
+  real seeded catalog item and quantity must be a positive whole number of at
+  most 100 units per action; available stock is capped at 1,000 units. A restock
+  changes available stock only, leaves active reservations and all purchase
+  lifecycle records untouched, and records a replay-safe operation and audit
+  event. Its response exposes the selected item and available quantity before
+  and after the change. This is simulated stock only, not live merchant
+  inventory.
 
 Funding examples use the explicit local simulation authorization header and are
 deliberately not live-provider instructions:
@@ -502,10 +519,12 @@ curl -sS -X POST http://127.0.0.1:3000/api/wallet/simulated-top-up \
 
 The top-up response includes the updated fake wallet, balanced simulation ledger
 legs, a safe action and transaction reference, and persisted top-up and audit
-records.
+records. The response also includes the canonical `simulationResources`
+projection.
 Repeated requests with the same action key replay the original result without a
-second credit. This route is for the documented loopback local simulation only,
-not a real funding or custody boundary.
+second credit. The restock response uses the same projection and replay contract.
+Both controls are for the documented loopback local simulation only, not a real
+funding, custody, or inventory boundary.
 
 ## Local setup and validation
 

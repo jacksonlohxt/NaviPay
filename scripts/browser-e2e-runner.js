@@ -26,9 +26,20 @@ function pageText() {
 }
 
 function waitForText(pattern, attempts = 24) {
+  const source = pattern.toString();
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const text = pageText();
     if (pattern.test(text)) return text;
+    // chrome-devtools-axi truncates large eval results. Check the live DOM when
+    // the returned text is truncated so a larger developer surface cannot make
+    // a truthful browser assertion disappear from the test output.
+    if (/truncated|chars omitted|Result was truncated/i.test(text)) {
+      const liveMatch = runChrome(['eval', `() => ${source}.test(document.body.innerText)`]);
+      if (/true/.test(liveMatch)) {
+        const liveContext = runChrome(['eval', `() => { const value = document.body.innerText; const index = value.search(${source}); return value.slice(Math.max(0, index - 2000), index + 5000); }`]);
+        return `${text}\n${liveContext}`;
+      }
+    }
     runChrome(['wait', '250']);
   }
   throw new Error(`Timed out waiting for ${pattern}`);
@@ -46,12 +57,16 @@ async function waitForServer() {
 }
 
 async function post(pathname, body = {}, headers = {}) {
-  const response = await fetch(`${baseUrl}${pathname}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify(body)
-  });
-  return { response, payload: await response.json() };
+  try {
+    const response = await fetch(`${baseUrl}${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Connection: 'close', ...headers },
+      body: JSON.stringify(body)
+    });
+    return { response, payload: await response.json() };
+  } catch (error) {
+    throw new Error(`POST ${baseUrl}${pathname} failed: ${error.cause?.code || error.message}`, { cause: error });
+  }
 }
 
 function assertDefaultSurface(text, label) {
@@ -92,7 +107,7 @@ async function main() {
   assert.match(text, /Customer/);
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=customer]")?.getAttribute("aria-pressed")']), /true/);
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /false/);
-  assert.doesNotMatch(text, /Simulated wallet|Add simulated funds|Amount in XSGD/);
+  assert.doesNotMatch(text, /Simulation resources|Sandbox inventory|Restock simulated stock|Simulated wallet|Add simulated funds|Amount in XSGD/);
   assertDefaultSurface(text, 'idle');
 
   // Hold the request long enough to assert the running state as a real user would see it.
@@ -135,6 +150,12 @@ async function main() {
   assert.match(runChrome(['eval', '() => localStorage.getItem("navipay.presentation-mode")']), /developer/);
   assert.match(runChrome(['eval', '() => JSON.stringify({label: Boolean(document.querySelector("label[for=top-up-amount]")), described: Boolean(document.querySelector("#top-up-amount[aria-describedby]")), noOverflow: document.documentElement.scrollWidth <= window.innerWidth})']), /label.*true/);
   assert.match(runChrome(['eval', '() => JSON.stringify({label: Boolean(document.querySelector("label[for=top-up-amount]")), described: Boolean(document.querySelector("#top-up-amount[aria-describedby]")), noOverflow: document.documentElement.scrollWidth <= window.innerWidth})']), /described.*true/);
+  assert.match(text, /Simulation resources/);
+  assert.match(text, /Sandbox inventory/);
+  assert.match(text, /Razer DeathAdder V3/);
+  assert.match(runChrome(['eval', '() => JSON.stringify({restockLabel: Boolean(document.querySelector("label[for=restock-sku]")), quantityLabel: Boolean(document.querySelector("label[for=restock-quantity]")), described: Boolean(document.querySelector("#restock-quantity[aria-describedby]")), noOverflow: document.documentElement.scrollWidth <= window.innerWidth})']), /restockLabel.*true/);
+  assert.match(runChrome(['eval', '() => JSON.stringify({restockLabel: Boolean(document.querySelector("label[for=restock-sku]")), quantityLabel: Boolean(document.querySelector("label[for=restock-quantity]")), described: Boolean(document.querySelector("#restock-quantity[aria-describedby]")), noOverflow: document.documentElement.scrollWidth <= window.innerWidth})']), /quantityLabel.*true/);
+  assert.match(runChrome(['eval', '() => JSON.stringify({restockLabel: Boolean(document.querySelector("label[for=restock-sku]")), quantityLabel: Boolean(document.querySelector("label[for=restock-quantity]")), described: Boolean(document.querySelector("#restock-quantity[aria-describedby]")), noOverflow: document.documentElement.scrollWidth <= window.innerWidth})']), /described.*true/);
 
   // Developer-only simulated funding validates input, credits the server wallet, and survives refresh.
   runChrome(['eval', '() => { const input = document.querySelector("#top-up-amount"); input.value = "0.00"; document.querySelector("#top-up-form").requestSubmit(); return "invalid-top-up"; }']);
@@ -148,6 +169,16 @@ async function main() {
   runChrome(['eval', '() => { location.reload(); return "reloading-top-up"; }']);
   text = waitForText(/Latest local top-up/i);
   assert.match(text, /XSGD 25\.00/);
+  runChrome(['eval', '() => { const input = document.querySelector("#restock-quantity"); input.value = "0"; document.querySelector("#restock-form").requestSubmit(); return "invalid-restock"; }']);
+  text = waitForText(/positive whole number/i);
+  assert.doesNotMatch(text, /Restocked .*available stock/);
+  runChrome(['eval', '() => { const select = document.querySelector("#restock-sku"); select.value = "sku-razer-deathadder-v3"; select.dispatchEvent(new Event("change", { bubbles: true })); const input = document.querySelector("#restock-quantity"); input.value = "1"; document.querySelector("#restock-form").requestSubmit(); return "restock-submitted"; }']);
+  text = waitForText(/Restocked Razer DeathAdder V3/);
+  assert.match(text, /available stock 0 → 1/);
+  runChrome(['eval', '() => { location.reload(); return "reloading-restock"; }']);
+  text = waitForText(/Latest simulated restock/i);
+  assert.match(text, /Razer DeathAdder V3/);
+  assert.match(text, /0 → 1/);
   runChrome(['resize', '390', '844']);
   assert.match(runChrome(['eval', '() => document.documentElement.scrollWidth <= window.innerWidth ? "top-up-narrow-ok" : "overflow"']), /top-up-narrow-ok/);
   runChrome(['resize', '1440', '1000']);
@@ -156,13 +187,39 @@ async function main() {
   assert.equal(duplicateTopUp.response.status, 201);
   assert.equal(duplicateTopUpReplay.response.status, 201);
   assert.equal(duplicateTopUpReplay.payload.replayed, true);
+  const duplicateRestock = await post('/api/simulation/resources/restock', { sku: 'sku-razer-deathadder-v3', quantity: 2 }, { 'Idempotency-Key': 'ui-runner-duplicate-restock', 'X-NaviPay-Local-Simulation': 'true' });
+  const duplicateRestockReplay = await post('/api/simulation/resources/restock', { sku: 'sku-razer-deathadder-v3', quantity: 2 }, { 'Idempotency-Key': 'ui-runner-duplicate-restock', 'X-NaviPay-Local-Simulation': 'true' });
+  assert.equal(duplicateRestock.response.status, 201);
+  assert.equal(duplicateRestockReplay.response.status, 201);
+  assert.equal(duplicateRestockReplay.payload.replayed, true);
 
   // The presentation preference survives a refresh, and customer mode remains one click away.
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=developer]")?.getAttribute("aria-pressed")']), /true/);
   runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=customer]").click(); return "customer-selected"; }']);
   text = waitForText(/Customer view/);
-  assert.doesNotMatch(text, /Developer evidence|Quote ID|KYC|recorded replay|Simulated wallet|Add simulated funds/i);
+  assert.doesNotMatch(text, /Developer evidence|Quote ID|KYC|recorded replay|Simulation resources|Sandbox inventory|Simulated wallet|Add simulated funds/i);
   assert.match(runChrome(['eval', '() => document.querySelector("[data-presentation-mode=customer]")?.getAttribute("aria-pressed")']), /true/);
+
+  // A truthful out-of-stock result recovers only after a Developer restock, then reruns the public purchase path.
+  await resetAndOpen();
+  runChrome(['open', baseUrl]);
+  waitForText(/What should we buy/);
+  runChrome(['eval', '() => { const input = document.querySelector("#request-input"); input.value = "buy a Razer mouse"; document.querySelector("#request-form").requestSubmit(); return "out-of-stock-run"; }']);
+  text = waitForText(/Item is out of stock/);
+  assert.match(text, /Nothing was reserved or paid/);
+  assert.match(text, /No order/);
+  runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=developer]").click(); return "developer-restock-recovery"; }']);
+  text = waitForText(/Simulation resources/);
+  assert.match(text, /Razer DeathAdder V3/);
+  runChrome(['eval', '() => { const select = document.querySelector("#restock-sku"); select.value = "sku-razer-deathadder-v3"; select.dispatchEvent(new Event("change", { bubbles: true })); const input = document.querySelector("#restock-quantity"); input.value = "1"; document.querySelector("#restock-form").requestSubmit(); return "restock-recovery-submitted"; }']);
+  text = waitForText(/Restocked Razer DeathAdder V3/);
+  assert.match(text, /0 → 1/);
+  runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=customer]").click(); return "customer-recovery"; }']);
+  waitForText(/Customer view/);
+  runChrome(['eval', '() => { document.querySelector("[data-new-purchase]").click(); document.querySelector("#request-input").value = "buy a Razer mouse"; document.querySelector("#request-form").requestSubmit(); return "recovered-purchase"; }']);
+  text = waitForText(/Purchase delivered/);
+  assert.match(text, /Razer DeathAdder V3/);
+  assert.doesNotMatch(text, /Item is out of stock/);
 
   // The payment drawer is secondary, human-facing, safe, and keyboard dismissible.
   runChrome(['eval', '() => { window.fetch = window.__navipayFetch || window.fetch; document.querySelector("[data-open-drawer]").click(); return "drawer-open"; }']);
