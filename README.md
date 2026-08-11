@@ -26,8 +26,10 @@ local fixture proves a live provider event.
 | Money                 | Fake XSGD wallet and local ledger                   |
 | Agent mode            | Recorded replay or deterministic fallback           |
 | Side-effect authority | Server policy and local adapters                    |
-| Customer artifact     | Customer outcome and receipt projection             |
-| Reviewer artifact     | Four-stage read-only evidence                       |
+| Primary presentation  | User mode: one sentence in, concise result out      |
+| Technical presentation | Developer mode: evidence and local controls        |
+| User artifact         | User outcome and receipt projection                |
+| Reviewer artifact     | Four-stage read-only evidence                      |
 | Persistence           | Version 2 local JSON store                          |
 | Runtime               | One Node.js process on `127.0.0.1`                  |
 
@@ -55,8 +57,8 @@ but unverifiable automation story.
 - **Contributor or design and engineering team:** use the seeded fixtures and
   deterministic scenarios to understand the contracts, build UI or adapter
   changes, and prove that a failure did not become a false success.
-- **Simulated customer:** enter one natural instruction, see a calm status and
-  receipt, and take only the next action the server exposes.
+- **User:** enter one natural instruction, see a calm status and receipt, and
+  take only the next action the server exposes.
 
 ### Goals
 
@@ -70,6 +72,30 @@ but unverifiable automation story.
    payment, compensation, refund, reversal, and delivery failure.
 5. Keep browser and reviewer responses useful while excluding credentials, raw
    provider payloads, raw page content, and unsafe model data.
+
+### MVP presentation modes
+
+**User mode** is the primary presentation and the minimal path for a person who types what they want to buy in one sentence and receives a concise result.
+
+User mode uses plain language and hides implementation jargon and technical evidence without changing account access, authorization, purchase rules, or safety boundaries.
+
+The user-facing lifecycle is intentionally compact: NaviPay **understands** the request, **finds** a matching seeded item, **pays** only after server checks approve the exact purchase, and **delivers** the local order with a truthful result.
+
+These four concepts describe the validated wireframe direction, not a claim that the Lavish wireframe is shipped production UI.
+
+**Developer mode** is the technical presentation layer for the same purchase flow.
+
+It may expose evidence, lifecycle detail, and safe local controls for fake funds and seeded inventory, but it is not a separate authorization, account-access, or purchase-approval surface.
+
+The shipped product uses the existing presentation preference and API contracts described below; mode selection changes presentation only.
+
+### MVP intent handling
+
+Local deterministic matching remains the current MVP path for interpreting bounded purchase requests and selecting seeded catalog candidates.
+
+A future optional LLM interpretation adapter may help translate natural language into a bounded proposal, but an LLM must never become the authority for payment, authorization, inventory, or purchase safety.
+
+No LLM integration is shipped by this README update, and the recorded replay and deterministic fallback remain the current agent paths.
 
 ### Non-goals
 
@@ -238,7 +264,7 @@ The four reviewer stages are:
 - **Execution:** local checkout, capture, ledger, merchant credit, order,
   fulfillment, delivery, and receipt facts.
 
-The customer projection exposes only a compact mode disclosure and stage
+The User projection exposes only a compact mode disclosure and stage
 statuses. The read-only reviewer projection exposes the typed proposal, safe
 context summary, server policy decision, allowlisted tool registry, safe
 observations, safe tool facts, evidence references, hashes, budgets, retries,
@@ -457,10 +483,13 @@ Contract notes:
   payment or checkout authority.
 - Developer mode exposes a **Simulation resources** surface for local scenario
   setup. It groups the fake XSGD wallet with the seeded sandbox inventory while
-  Customer mode renders neither the surface nor its controls. The name describes
-  both replenishable local inputs without implying custody or live merchant
-  access. The surface is a presentation preference, not authentication,
-  authorization, or purchase approval.
+  User mode renders neither the surface nor its controls. The surface persists
+  fake XSGD top-ups and seeded inventory restocks, safely replays the same
+  idempotent operation without duplicating it, suppresses these controls from
+  the User experience, and supports recovery from an out-of-stock result after
+  restocking. The name describes both replenishable local inputs without
+  implying custody or live merchant access. The surface is a presentation
+  preference, not authentication, authorization, or purchase approval.
 - The wallet control calls `POST /api/wallet/simulated-top-up` with a stable
   `Idempotency-Key` and `X-NaviPay-Local-Simulation: true`. It accepts XSGD only,
   credits the server-owned fake wallet through balanced local ledger legs, and
@@ -505,8 +534,8 @@ network call. It does not create a blockchain transaction or accept a real
 deposit. Do not treat its reference, network label, or confirmation evidence as
 provider evidence.
 
-For deterministic insufficient-funds and recovery setup, use the Developer
-view's **Add simulated funds** control after a failed purchase. The equivalent
+For deterministic insufficient-funds and recovery setup, use Developer mode's
+**Add simulated funds** control after a failed purchase. The equivalent
 local-only API call is:
 
 ```sh
@@ -542,7 +571,9 @@ npm install
 npm start
 ```
 
-Open <http://127.0.0.1:3000>. Use an example request such as
+Open <http://127.0.0.1:3000> in User mode for the minimal experience, or switch to Developer mode when reviewing evidence and local controls.
+
+Use an example request such as
 `buy a Logitech mouse` or `Find an Apple Magic Keyboard`. The default path uses
 the seeded catalog and does not require Playwright. After reset, the fake wallet
 starts at XSGD 500.00 and the mock KYC profile is pending until the purchase
