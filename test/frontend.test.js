@@ -30,6 +30,10 @@ test('frontend contract keeps the calm purchase path and safe secondary surfaces
   assert.doesNotMatch(frontend, /data-cell\('Remaining demo balance'/);
   assert.match(frontend, /Task-scoped demo balance/);
   assert.match(frontend, /never the global wallet balance/);
+  assert.match(frontend, /focusable/);
+  assert.match(frontend, /aria-hidden/);
+  assert.match(frontend, /event.key !== 'Tab'/);
+  assert.match(frontend, /drawer-open/);
   assert.doesNotMatch(frontend, /data-payment-action="refund"|data-payment-action="reverse"/);
   assert.doesNotMatch(frontend, /Operator\/demo controls|agent reasoning/i);
   assert.match(frontend, /data-resolution="authorized"/);
@@ -47,6 +51,13 @@ test('frontend contract keeps the calm purchase path and safe secondary surfaces
   assert.match(frontend, /Quote ID/);
   assert.match(frontend, /KYC/);
   assert.match(frontend, /No receipt was issued/);
+  assert.match(frontend, /I understood/);
+  assert.match(frontend, /Why this item/);
+  assert.match(frontend, /Price check/);
+  assert.match(frontend, /Nothing is reserved or paid until you choose/);
+  assert.match(frontend, /Simulated local delivery/);
+  assert.match(frontend, /Original purchase/);
+  assert.match(frontend, /customer-recovery-note/);
   assert.doesNotMatch(frontend, /Purchase effects|progressBands/);
 });
 
@@ -57,6 +68,7 @@ test('frontend contract retains truthful failure language and accessible visual 
   assert.match(frontend, /No automatic retry will occur/);
   assert.match(stylesheet, /:focus-visible/);
   assert.match(stylesheet, /prefers-reduced-motion/);
+  assert.doesNotMatch(stylesheet, /fonts\.googleapis|https:\/\//);
   assert.match(stylesheet, /grid-template-columns: repeat\(3, 1fr\)/);
   assert.match(calmStylesheet, /receipt-status-row/);
   assert.match(calmStylesheet, /presentation-mode/);

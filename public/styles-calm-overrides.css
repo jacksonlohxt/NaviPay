@@ -171,6 +171,7 @@
   .run-actions .quiet-dark-button { margin-left: auto; }
   .receipt-heading { flex-direction: column; }
   .receipt-heading > strong { font-size: 1.15rem; }
+  .purchase-contract, .delivery-details-grid, .developer-reviewer-summary { grid-template-columns: 1fr; }
   .commerce-grid, .side-effects-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .side-effects-grid .data-cell:last-child { grid-column: span 2; }
   .receipt-adjustment .balance-grid { grid-template-columns: 1fr; }
@@ -251,6 +252,11 @@
 .developer-evidence-heading h2 { margin: .3rem 0 .25rem; color: var(--color-white); font-size: 1.2rem; letter-spacing: -.04em; }
 .developer-evidence-heading p, .developer-disclosure { margin: 0; max-width: 530px; color: rgba(255, 255, 255, .58); font-size: .7rem; }
 .developer-simulation-boundary { margin: 0; padding: .7rem .8rem; border: 1px solid rgba(189, 244, 119, .22); border-radius: var(--radius-md); background: rgba(189, 244, 119, .08); color: var(--color-lime); font-family: var(--font-mono); font-size: .62rem; }
+.developer-reviewer-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45rem; padding: .75rem; border: 1px solid rgba(189, 244, 119, .24); border-radius: var(--radius-md); background: rgba(189, 244, 119, .07); }
+.developer-reviewer-summary > div { min-width: 0; }
+.developer-reviewer-summary strong, .developer-reviewer-summary small { display: block; overflow-wrap: anywhere; }
+.developer-reviewer-summary strong { margin-top: .22rem; color: var(--color-white); font-size: .75rem; }
+.developer-reviewer-summary small { margin-top: .18rem; color: rgba(255, 255, 255, .52); font-size: .61rem; }
 .developer-lifecycle { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .45rem; }
 .developer-stage { min-width: 0; padding: .7rem; border: 1px solid rgba(255, 255, 255, .12); border-radius: var(--radius-md); background: rgba(255, 255, 255, .045); }
 .developer-stage strong, .developer-stage small { display: block; overflow-wrap: anywhere; }
@@ -315,6 +321,21 @@
 .attempted-purchase-panel h2 { max-width: 520px; margin: .25rem 0 .2rem; color: var(--color-ink); font-size: clamp(1.25rem, 3.8vw, 1.75rem); letter-spacing: -.05em; }
 .attempted-purchase-panel .status-pill { align-self: flex-start; }
 .attempted-purchase-panel .receipt-status-row { margin-top: .9rem; }
+.purchase-contract { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin-top: .9rem; padding-top: .85rem; border-top: 1px solid var(--color-line); }
+.purchase-contract > div { min-width: 0; padding: .65rem .7rem; border-radius: var(--radius-md); background: rgba(217, 241, 229, .55); }
+.contract-label { display: block; color: var(--color-muted); font-size: .59rem; font-weight: 950; letter-spacing: .1em; text-transform: uppercase; }
+.purchase-contract strong, .purchase-contract small { display: block; overflow-wrap: anywhere; }
+.purchase-contract strong { margin-top: .22rem; color: var(--color-ink); font-size: .72rem; }
+.purchase-contract small { margin-top: .2rem; color: var(--color-muted); font-size: .6rem; }
+.customer-recovery-note, .selection-safety-note { margin: .75rem 0 0; padding: .7rem .75rem; border-radius: var(--radius-md); background: rgba(255, 241, 190, .58); color: var(--color-ink-soft); font-size: .68rem; }
+.customer-recovery-note strong { display: block; margin-bottom: .15rem; color: var(--color-ink); font-size: .7rem; }
+.selection-safety-note { margin-bottom: .7rem; background: rgba(255, 241, 190, .42); font-weight: 750; }
+.delivery-details { margin-top: .75rem; }
+.delivery-details summary { display: flex; align-items: baseline; justify-content: space-between; gap: .7rem; }
+.delivery-details summary span { color: var(--color-muted); font-size: .61rem; font-weight: 700; }
+.delivery-details-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; padding: 0 .75rem .7rem; }
+.delivery-details-grid .data-cell { background: rgba(217, 241, 229, .55); }
+.delivery-provenance { margin: 0; padding: 0 .75rem .75rem; color: var(--color-muted); font-size: .62rem; }
 .attempted-purchase-note { margin: .8rem 0 0; color: var(--color-ink-soft); font-size: .72rem; font-weight: 800; }
 .receipt-status-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin-top: .75rem; }
 .receipt-status-cell { min-width: 0; padding: .65rem .7rem; border-radius: var(--radius-md); background: rgba(217, 241, 229, .55); }

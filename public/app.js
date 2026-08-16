@@ -380,6 +380,48 @@ function matchReason(task) {
   return Array.isArray(reasons) ? reasons.join('; ') : reasons || '';
 }
 
+function customerQuoteFreshness(task) {
+  const quote = taskQuote(task);
+  if (!quote.expiresAt) return { label: 'Price timing unavailable', detail: 'NaviPay will check the price again before payment.' };
+  const expiresAt = Date.parse(quote.expiresAt);
+  if (!Number.isFinite(expiresAt)) return { label: 'Price timing unavailable', detail: 'NaviPay will check the price again before payment.' };
+  if (expiresAt <= Date.now()) return { label: 'Price check expired', detail: 'NaviPay must refresh the price before any payment.' };
+  return { label: 'Price checked and still fresh', detail: `Valid until ${formatDate(quote.expiresAt)}` };
+}
+
+function purchaseContract(task) {
+  const quote = taskQuote(task);
+  const candidate = quote.lockedSnapshot || quote.candidates?.find((item) => item.id === quote.selectedCandidateId);
+  const clearMatch = task.state !== 'awaiting_selection' && (quote.recommendation?.status === 'clear' || Boolean(quote.selectedCandidateId));
+  if (!candidate?.item || !clearMatch) return '';
+  const interpretation = requestInterpretation(task);
+  const reason = matchReason(task) || 'The request matched this item in the seeded local catalog.';
+  const freshness = customerQuoteFreshness(task);
+  return `<section class="purchase-contract" aria-label="Purchase contract"><div><span class="contract-label">I understood</span><strong>${escapeHtml(interpretation)}</strong><small>Server-checked request</small></div><div><span class="contract-label">Why this item</span><strong>${escapeHtml(reason)}</strong><small>Server-owned match rationale</small></div><div><span class="contract-label">Price check</span><strong>${escapeHtml(freshness.label)}</strong><small>${escapeHtml(freshness.detail)}</small></div></section>`;
+}
+
+function deliveryDetails(task) {
+  const delivery = taskProjection(task).delivery || task.delivery || {};
+  const effect = customerOutcome(task).sideEffects?.delivery || {};
+  const status = effect.label || statusLabels[delivery.status] || 'Not available';
+  const nextState = delivery.status === 'delivered'
+    ? 'No further simulated update is scheduled.'
+    : delivery.status === 'failed'
+      ? 'Needs attention. No external carrier update is available.'
+      : delivery.status === 'pending'
+        ? 'Waiting for the next simulated delivery update.'
+        : 'Not started until the order is confirmed.';
+  const tracking = delivery.trackingReference ? 'Simulated reference available' : 'No tracking update available';
+  return `<details class="receipt-details delivery-details"><summary>Delivery details <span>Simulated local delivery</span></summary><div class="delivery-details-grid">${dataCell('Status', status)}${dataCell('Next state', nextState)}${dataCell('Tracking', tracking)}</div><p class="delivery-provenance">Simulated local delivery only. No external carrier, live tracking, or support authority is connected.</p></details>`;
+}
+
+function recoveryHandoff(task) {
+  const code = customerOutcome(task).code;
+  if (code === 'insufficient_funds') return '<p class="customer-recovery-note"><strong>Safe next step</strong> For this local demo, add simulated funds in Developer view, then start a new purchase. This purchase will not retry automatically.</p>';
+  if (code === 'payment_unknown') return '<p class="customer-recovery-note"><strong>Safe next step</strong> Choose whether payment was approved or declined below. NaviPay will continue this run without retrying the payment.</p>';
+  return '';
+}
+
 function selectionDetails(task, { open = false, includeCandidates = false } = {}) {
   const interpretation = requestInterpretation(task);
   const reason = matchReason(task);
@@ -388,7 +430,7 @@ function selectionDetails(task, { open = false, includeCandidates = false } = {}
     ? `${source.label} - read-only local replay evidence`
     : `${source.label || 'Seeded catalog'} - deterministic local match`;
   if (!interpretation && !reason && !includeCandidates) return '';
-  return `<details class="evidence-group selection-details"${open ? ' open' : ''}><summary>How this was chosen <span>Interpretation and rationale</span></summary><div class="evidence-content"><dl class="detail-list">${detailValue('Interpreted as', interpretation)}${detailValue('Matched because', reason || 'Request matched the selected item')}${detailValue('Source', provenance)}</dl>${includeCandidates ? candidateDetails(task) : ''}</div></details>`;
+  return `<details class="evidence-group selection-details"${open ? ' open' : ''}><summary>How this was chosen <span>Interpretation and rationale</span></summary><div class="evidence-content"><dl class="detail-list">${detailValue('Interpreted as', interpretation)}${detailValue('Matched because', reason || 'Request matched the selected item')}${detailValue('Source', provenance)}</dl>${includeCandidates ? `<p class="selection-safety-note">Nothing is reserved or paid until you choose an item.</p>${candidateDetails(task)}` : ''}</div></details>`;
 }
 
 function statusToneFor(effect) {
@@ -436,20 +478,20 @@ function attemptedPurchasePanel(task) {
   const outcomeValue = customerOutcome(task);
   const facts = purchaseFacts(task);
   const hasFacts = facts.item || Number.isFinite(facts.total);
-  const title = facts.item || (outcomeValue.purchaseEntered ? 'Purchase details' : 'No purchase record');
-  const merchantLine = facts.merchant ? `${facts.merchant}${facts.variant ? ` · ${facts.variant}` : ''}` : 'No item was selected';
-  const amount = Number.isFinite(facts.total) ? `<strong class="receipt-total">${formatMoney(facts.total, facts.currency)}</strong>` : statusPill(task.state);
   const choiceOpen = task.state === 'awaiting_selection';
+  const title = choiceOpen ? 'Choose an item' : facts.item || (outcomeValue.purchaseEntered ? 'Purchase details' : 'No purchase record');
+  const merchantLine = choiceOpen ? 'Several local items match this request. Compare before continuing.' : facts.merchant ? `${facts.merchant}${facts.variant ? ` · ${facts.variant}` : ''}` : 'No item was selected';
+  const amount = choiceOpen ? statusPill('awaiting_selection', 'Selection required') : Number.isFinite(facts.total) ? `<strong class="receipt-total">${formatMoney(facts.total, facts.currency)}</strong>` : statusPill(task.state);
   const receiptStatus = outcomeValue.sideEffects?.receipt;
   const receiptNote = receiptStatus?.status === 'not_started' ? '<p class="attempted-purchase-note">No receipt was issued.</p>' : '';
-  return `<section class="attempted-purchase-panel" aria-labelledby="attempted-purchase-title"><div class="panel-heading"><div><span class="overline">${hasFacts ? 'Purchase details' : 'Purchase record'}</span><h2 id="attempted-purchase-title">${escapeHtml(title)}</h2><p class="merchant-line">${escapeHtml(merchantLine)}</p></div>${amount}</div>${compactStatusRow(task)}${receiptNote}${selectionDetails(task, { open: choiceOpen, includeCandidates: choiceOpen })}${nextActionControls(task)}${terminalDisclosure()}</section>`;
+  return `<section class="attempted-purchase-panel" aria-labelledby="attempted-purchase-title"><div class="panel-heading"><div><span class="overline">${choiceOpen ? 'Purchase choice' : hasFacts ? 'Purchase details' : 'Purchase record'}</span><h2 id="attempted-purchase-title">${escapeHtml(title)}</h2><p class="merchant-line">${escapeHtml(merchantLine)}</p></div>${amount}</div>${purchaseContract(task)}${compactStatusRow(task)}${recoveryHandoff(task)}${receiptNote}${selectionDetails(task, { open: choiceOpen, includeCandidates: choiceOpen })}${nextActionControls(task)}${terminalDisclosure()}</section>`;
 }
 
 function receiptAdjustment(adjustment, currency) {
   if (!adjustment) return '';
   const statusLabel = adjustment.status === 'failed' ? 'Payment update needs review' : adjustment.kind === 'reversal' ? 'Payment reversed' : 'Payment refunded';
   const netCharged = formatMoney(adjustment.netChargedMinor, currency);
-  return `<div class="receipt-adjustment"><div class="panel-heading"><div><span class="overline">Current payment update</span><h3>${escapeHtml(statusLabel)}</h3></div>${statusPill(adjustment.status, adjustment.status === 'failed' ? 'Needs review' : statusLabel)}</div><p class="receipt-adjustment-note">The receipt above is the immutable original purchase record. This update shows the current payment status and net amount.</p><div class="balance-grid">${dataCell('Payment now', statusLabels[adjustment.currentPaymentStatus] || adjustment.currentPaymentStatus || 'Not available')}${dataCell('Net payment', netCharged)}${dataCell('Returned', formatMoney(adjustment.netRefundedMinor, currency))}</div><details class="receipt-details"><summary>Payment reference</summary><dl class="detail-list">${detailValue('Update reference', shortId(adjustment.reference))}${detailValue('Recorded', formatDate(adjustment.occurredAt))}</dl></details></div>`;
+  return `<div class="receipt-adjustment"><div class="panel-heading"><div><span class="overline">Current payment adjustment</span><h3>${escapeHtml(statusLabel)}</h3></div>${statusPill(adjustment.status, adjustment.status === 'failed' ? 'Needs review' : statusLabel)}</div><p class="receipt-adjustment-note">The original purchase above is unchanged. This section reports the current refund or reversal and the net amount after that adjustment.</p><div class="balance-grid">${dataCell('Payment now', statusLabels[adjustment.currentPaymentStatus] || adjustment.currentPaymentStatus || 'Not available')}${dataCell('Net payment', netCharged)}${dataCell('Returned', formatMoney(adjustment.netRefundedMinor, currency))}</div><details class="receipt-details"><summary>Payment reference</summary><dl class="detail-list">${detailValue('Update reference', shortId(adjustment.reference))}${detailValue('Recorded', formatDate(adjustment.occurredAt))}</dl></details></div>`;
 }
 
 function receiptPanel(task) {
@@ -457,7 +499,11 @@ function receiptPanel(task) {
   if (!receipt || receipt.status !== 'confirmed') return '';
   const currency = receipt.currency || task.currency || 'XSGD';
   const paymentStatus = paymentOutcome(task) || receipt.paymentStatus;
-  return `<section class="receipt-panel canonical-order-card" aria-labelledby="receipt-title"><div class="panel-heading"><div><span class="overline">Your receipt</span><h2 id="receipt-title">Purchase confirmed</h2></div>${statusPill(paymentStatus === 'refunded' || paymentStatus === 'reversed' ? paymentStatus : receipt.status, paymentStatus === 'refunded' ? 'Refunded' : paymentStatus === 'reversed' ? 'Reversed' : 'Confirmed')}</div><div class="receipt-heading"><div><strong>${escapeHtml(receipt.item || 'Item')}</strong><small>${escapeHtml(receipt.merchant || 'Merchant')}${receipt.variant ? ` · ${escapeHtml(receipt.variant)}` : ''}</small></div><strong>${formatMoney(receipt.totalMinor ?? receipt.amountMinor, currency)}</strong></div><p class="receipt-capture-note">Original payment recorded on ${escapeHtml(formatDate(receipt.issuedAt))}. This receipt keeps the original purchase facts.</p>${compactStatusRow(task)}<details class="receipt-details"><summary>View price details</summary><div class="quote-breakdown">${dataCell('Item', formatMoney(receipt.subtotalMinor, currency))}${dataCell('Shipping', formatMoney(receipt.shippingMinor, currency))}${dataCell('Tax', formatMoney(receipt.taxMinor, currency))}${dataCell('Total', formatMoney(receipt.totalMinor ?? receipt.amountMinor, currency))}</div></details>${selectionDetails(task, { open: isDeveloperMode() })}${receiptAdjustment(receipt.adjustment, currency)}${isDeveloperMode() ? `<details class="receipt-details receipt-references"><summary>Receipt references</summary><dl class="detail-list">${detailValue('Receipt reference', shortId(receipt.id))}${detailValue('Payment reference', shortId(receipt.paymentReference))}${detailValue('Order reference', shortId(receipt.orderReference))}${detailValue('Purchase record', `${shortId(receipt.quoteId)} / ${shortId(receipt.cartId)}`)}${detailValue('Issued', formatDate(receipt.issuedAt))}</dl></details>` : ''}${nextActionControls(task, { receiptVisible: true })}${terminalDisclosure()}</section>`;
+  const adjusted = Boolean(receipt.adjustment);
+  const originalHeading = adjusted ? 'Original purchase' : 'Purchase confirmed';
+  const originalOverline = adjusted ? 'Original receipt' : 'Your receipt';
+  const originalStatus = adjusted ? 'Paid when purchased' : 'Confirmed';
+  return `<section class="receipt-panel canonical-order-card" aria-labelledby="receipt-title"><div class="panel-heading"><div><span class="overline">${originalOverline}</span><h2 id="receipt-title">${originalHeading}</h2></div>${statusPill(receipt.status, originalStatus)}</div><div class="receipt-heading"><div><strong>${escapeHtml(receipt.item || 'Item')}</strong><small>${escapeHtml(receipt.merchant || 'Merchant')}${receipt.variant ? ` · ${escapeHtml(receipt.variant)}` : ''}</small></div><strong>${formatMoney(receipt.totalMinor ?? receipt.amountMinor, currency)}</strong></div>${purchaseContract(task)}<p class="receipt-capture-note">Original purchase recorded on ${escapeHtml(formatDate(receipt.issuedAt))}. These item, merchant, and total facts do not change.</p>${compactStatusRow(task)}${deliveryDetails(task)}<details class="receipt-details"><summary>View price details</summary><div class="quote-breakdown">${dataCell('Item', formatMoney(receipt.subtotalMinor, currency))}${dataCell('Shipping', formatMoney(receipt.shippingMinor, currency))}${dataCell('Tax', formatMoney(receipt.taxMinor, currency))}${dataCell('Total', formatMoney(receipt.totalMinor ?? receipt.amountMinor, currency))}</div></details>${selectionDetails(task, { open: isDeveloperMode() })}${receiptAdjustment(receipt.adjustment, currency)}${isDeveloperMode() ? `<details class="receipt-details receipt-references"><summary>Receipt references</summary><dl class="detail-list">${detailValue('Receipt reference', shortId(receipt.id))}${detailValue('Payment reference', shortId(receipt.paymentReference))}${detailValue('Order reference', shortId(receipt.orderReference))}${detailValue('Purchase record', `${shortId(receipt.quoteId)} / ${shortId(receipt.cartId)}`)}${detailValue('Issued', formatDate(receipt.issuedAt))}</dl></details>` : ''}${nextActionControls(task, { receiptVisible: true })}${terminalDisclosure()}</section>`;
 }
 
 function taskFacts() {
@@ -511,6 +557,13 @@ function advancedDetails(task) {
 }
 
 // Acceptance track: developer mode exposes safe server-owned evidence for the same run.
+function developerReviewerSummary(task) {
+  const result = customerOutcome(task);
+  const stages = state.reviewer?.stages || [];
+  const stageLabel = stages.length === 4 ? 'Four server-owned stages recorded' : 'Four-stage proof is loading';
+  return `<div class="developer-reviewer-summary" aria-label="Reviewer summary"><div><span class="data-label">Outcome first</span><strong>${escapeHtml(result.title)}</strong><small>${escapeHtml(result.message)}</small></div><div><span class="data-label">Proof hierarchy</span><strong>Funding · Discovery · Issuance · Execution</strong><small>${escapeHtml(stageLabel)}. Detailed evidence is collapsed below.</small></div></div>`;
+}
+
 function developerLifecycle(task) {
   const effects = customerOutcome(task).sideEffects || {};
   const stages = [
@@ -550,7 +603,7 @@ function developerAgentDetails(projection) {
   const mode = provenance.label || agent.mode || 'Not available';
   const provenanceRows = `${detailValue('Replay mode', mode)}${detailValue('Mode ID', reviewer?.modeId || 'Not available')}${detailValue('Bundle', provenance.bundleVersion || 'Not available')}${detailValue('Model', provenance.model || 'Offline fixture')}${detailValue('Network', provenance.network === false ? 'Offline / no network' : 'Local-only boundary')}${detailValue('Credentials', provenance.credentials === false ? 'Not used' : 'Never exposed')}${detailValue('Event evidence', `${eventCount} bounded event${eventCount === 1 ? '' : 's'}`)}`;
   const proposalBlock = proposal ? `<details class="developer-subdetails"><summary>Bounded agent proposal</summary><pre class="developer-code">${escapeHtml(JSON.stringify(proposal, null, 2))}</pre></details>` : '<p class="developer-muted">Agent replay evidence is not available yet.</p>';
-  return `<details class="developer-group" open><summary>Agent and simulation provenance <span>Read-only, bounded evidence</span></summary><div class="developer-content"><dl class="detail-list">${provenanceRows}</dl><p class="developer-disclosure">${escapeHtml(agent.disclosure || 'The local server remained authoritative for every side effect.')}</p>${proposalBlock}</div></details>`;
+  return `<details class="developer-group"><summary>Agent and simulation provenance <span>Read-only, bounded evidence</span></summary><div class="developer-content"><dl class="detail-list">${provenanceRows}</dl><p class="developer-disclosure">${escapeHtml(agent.disclosure || 'The local server remained authoritative for every side effect.')}</p>${proposalBlock}</div></details>`;
 }
 
 function topUpAmountError(amount) {
@@ -619,7 +672,7 @@ function developerEvidence(task) {
   const reconciliation = task.state === 'reconciliation_required' || payment.status === 'unknown';
   const safeRefs = `${detailValue('Task reference', shortId(task.id))}${detailValue('Receipt reference', shortId(receipt.id))}${detailValue('Order reference', shortId(order.reference))}${detailValue('Payment reference', shortId(payment.reference))}${detailValue('Checkout reference', shortId(checkout.checkoutReference))}`;
   const customer = projection.request?.interpreted || {};
-  return `<section class="developer-evidence" aria-labelledby="developer-evidence-title"><div class="developer-evidence-heading"><div><span class="overline">Developer view</span><h2 id="developer-evidence-title">Developer evidence</h2><p>Read-only server-owned facts for this same purchase. This mode is a presentation preference, not authentication or authorization.</p></div>${modeBadge('Developer view')}</div><p class="developer-simulation-boundary">Simulation only. No real money, order, or delivery is used. Local fixtures are not live providers.</p>${developerLifecycle(task)}<details class="developer-group" open><summary>Request, candidate, and rationale <span>Interpretation and selection</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Original request', taskRequest(task))}${detailValue('Interpreted request', [customer.brand, customer.product || customer.productCategory, customer.quantity > 1 ? `${customer.quantity} items` : ''].filter(Boolean).join(' ') || 'Not available')}${detailValue('Selected candidate', selectedCandidateText)}${detailValue('Candidate count', quote.candidates?.length ?? 0)}${detailValue('Match rationale', matchReason(task) || 'No rationale recorded')}${detailValue('Discovery source', quote.source || projection.discovery?.label || 'Not available')}${detailValue('Target site', projection.discovery?.targetSite?.status || 'Not requested')}</dl>${quote.candidates?.length ? candidateDetails(task) : ''}</div></details><details class="developer-group" open><summary>Quote and inventory <span>Freshness, budget, and reservation</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Quote status', quote.quoteStatus || quote.status || 'Not available')}${detailValue('Quote ID', quote.quoteId || 'Not available')}${detailValue('Cart ID', quote.cartId || 'Not available')}${detailValue('Snapshot hash', quote.snapshotHash || 'Not available')}${detailValue('Quote expires', formatDate(quote.expiresAt))}${detailValue('Freshness', quoteFreshness)}${detailValue('Budget', quote.budget?.status || projection.budget?.status || 'Not available')}${detailValue('Inventory reservation', reservation.status || 'Not started')}${detailValue('Reservation reference', reservation.reference || 'Not available')}${detailValue('Lease expires', formatDate(reservation.leaseExpiresAt))}</dl><details class="developer-subdetails"><summary>Locked line snapshot</summary><pre class="developer-code">${escapeHtml(JSON.stringify(quote.lineSnapshot || [], null, 2))}</pre></details></div></details><details class="developer-group" open><summary>Funding, KYC, and authorization <span>Local boundaries and policy checks</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Funding provider', fundingProvider.id || 'Not available')}${detailValue('Funding mode', fundingProvider.mode || 'Not available')}${detailValue('Funding asset', projection.funding?.asset || funding.asset || task.currency)}${detailValue('Funding network', projection.funding?.chain || funding.network || 'Not available')}${detailValue('Funding evidence', projection.funding?.evidenceReference || 'Not available')}${detailValue('KYC status', kycStatus)}${detailValue('KYC provider mode', kyc.providerMode || 'Not available')}${detailValue('KYC decision reference', kyc.decisionReference || 'Not available')}${detailValue('Authorization status', decision?.status || 'Not available')}${detailValue('Authorization decision', decision?.decisionId || 'Not available')}${detailValue('Spending ceiling', formatSnapshotMoney(projection.spendingCeilingMinor, task.currency, 'Not available'))}</dl>${developerCheckDetails(decision)}</div></details><details class="developer-group" open><summary>Payment and issuer <span>Safe references only</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Payment state', payment.status || 'Not started')}${detailValue('Payment mode', payment.paymentMode || projection.paymentMode || 'Not available')}${detailValue('Amount', formatMoney(payment.amountMinor ?? quote.totalMinor, payment.currency || task.currency))}${detailValue('Issuer state', card?.status || 'Not issued')}${detailValue('Safe card reference', card?.maskedReference || 'Not available')}${detailValue('Capture count', `${card?.captureCount ?? 0} / ${card?.maxCaptures ?? 1}`)}${detailValue('Authorization reference', checkout.authorizationReference || 'Not available')}${detailValue('Capture reference', checkout.captureReference || 'Not available')}${detailValue('Checkout state', checkout.status || 'Not started')}${detailValue('Task balance before', formatSnapshotMoney(taskFinancialSnapshot.balanceBeforeMinor, task.currency, 'Not available'))}${detailValue('Task net charged', formatSnapshotMoney(taskFinancialSnapshot.netChargedMinor, task.currency, 'Not available'))}</dl></div></details><details class="developer-group" open><summary>Order, fulfillment, and delivery <span>Separate lifecycle records</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Order state', order.status || 'Not started')}${detailValue('Order reference', order.reference || 'Not available')}${detailValue('Fulfillment state', fulfillment.status || 'Not started')}${detailValue('Fulfillment reference', fulfillment.reference || 'Not available')}${detailValue('Delivery state', delivery.status || 'Not started')}${detailValue('Delivery reference', delivery.reference || 'Not available')}${detailValue('Tracking reference', delivery.trackingReference || 'Not available')}${detailValue('Receipt state', receipt.status || 'Not issued')}${detailValue('Receipt reference', receipt.id || 'Not available')}</dl></div></details><details class="developer-group" open><summary>Reliability, reconciliation, and activity <span>Replay-safe records</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Run state', task.state)}${detailValue('Next action', projection.nextAction || 'None')}${detailValue('Payment reconciliation', reconciliation ? 'Required' : 'Not required')}${detailValue('Automatic retry', reconciliation ? 'Disabled' : 'Not used')}${detailValue('Idempotency / replay', 'Server-owned action replay protection')}</dl>${developerOperationDetails(projection)}${developerActivityDetails(projection)}<details class="developer-subdetails"><summary>Safe references</summary><dl class="detail-list">${safeRefs}</dl></details></div></details>${developerAgentDetails(projection)}</section>`;
+  return `<section class="developer-evidence" aria-labelledby="developer-evidence-title"><div class="developer-evidence-heading"><div><span class="overline">Developer view</span><h2 id="developer-evidence-title">Developer evidence</h2><p>Read-only server-owned facts for this same purchase. This mode is a presentation preference, not authentication or authorization.</p></div>${modeBadge('Developer view')}</div><p class="developer-simulation-boundary">Simulation only. No real money, order, or delivery is used. Local fixtures are not live providers.</p>${developerReviewerSummary(task)}${developerLifecycle(task)}<details class="developer-group"><summary>Request, candidate, and rationale <span>Interpretation and selection</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Original request', taskRequest(task))}${detailValue('Interpreted request', [customer.brand, customer.product || customer.productCategory, customer.quantity > 1 ? `${customer.quantity} items` : ''].filter(Boolean).join(' ') || 'Not available')}${detailValue('Selected candidate', selectedCandidateText)}${detailValue('Candidate count', quote.candidates?.length ?? 0)}${detailValue('Match rationale', matchReason(task) || 'No rationale recorded')}${detailValue('Discovery source', quote.source || projection.discovery?.label || 'Not available')}${detailValue('Target site', projection.discovery?.targetSite?.status || 'Not requested')}</dl>${quote.candidates?.length ? candidateDetails(task) : ''}</div></details><details class="developer-group"><summary>Quote and inventory <span>Freshness, budget, and reservation</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Quote status', quote.quoteStatus || quote.status || 'Not available')}${detailValue('Quote ID', quote.quoteId || 'Not available')}${detailValue('Cart ID', quote.cartId || 'Not available')}${detailValue('Snapshot hash', quote.snapshotHash || 'Not available')}${detailValue('Quote expires', formatDate(quote.expiresAt))}${detailValue('Freshness', quoteFreshness)}${detailValue('Budget', quote.budget?.status || projection.budget?.status || 'Not available')}${detailValue('Inventory reservation', reservation.status || 'Not started')}${detailValue('Reservation reference', reservation.reference || 'Not available')}${detailValue('Lease expires', formatDate(reservation.leaseExpiresAt))}</dl><details class="developer-subdetails"><summary>Locked line snapshot</summary><pre class="developer-code">${escapeHtml(JSON.stringify(quote.lineSnapshot || [], null, 2))}</pre></details></div></details><details class="developer-group"><summary>Funding, KYC, and authorization <span>Local boundaries and policy checks</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Funding provider', fundingProvider.id || 'Not available')}${detailValue('Funding mode', fundingProvider.mode || 'Not available')}${detailValue('Funding asset', projection.funding?.asset || funding.asset || task.currency)}${detailValue('Funding network', projection.funding?.chain || funding.network || 'Not available')}${detailValue('Funding evidence', projection.funding?.evidenceReference || 'Not available')}${detailValue('KYC status', kycStatus)}${detailValue('KYC provider mode', kyc.providerMode || 'Not available')}${detailValue('KYC decision reference', kyc.decisionReference || 'Not available')}${detailValue('Authorization status', decision?.status || 'Not available')}${detailValue('Authorization decision', decision?.decisionId || 'Not available')}${detailValue('Spending ceiling', formatSnapshotMoney(projection.spendingCeilingMinor, task.currency, 'Not available'))}</dl>${developerCheckDetails(decision)}</div></details><details class="developer-group"><summary>Payment and issuer <span>Safe references only</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Payment state', payment.status || 'Not started')}${detailValue('Payment mode', payment.paymentMode || projection.paymentMode || 'Not available')}${detailValue('Amount', formatMoney(payment.amountMinor ?? quote.totalMinor, payment.currency || task.currency))}${detailValue('Issuer state', card?.status || 'Not issued')}${detailValue('Safe card reference', card?.maskedReference || 'Not available')}${detailValue('Capture count', `${card?.captureCount ?? 0} / ${card?.maxCaptures ?? 1}`)}${detailValue('Authorization reference', checkout.authorizationReference || 'Not available')}${detailValue('Capture reference', checkout.captureReference || 'Not available')}${detailValue('Checkout state', checkout.status || 'Not started')}${detailValue('Task balance before', formatSnapshotMoney(taskFinancialSnapshot.balanceBeforeMinor, task.currency, 'Not available'))}${detailValue('Task net charged', formatSnapshotMoney(taskFinancialSnapshot.netChargedMinor, task.currency, 'Not available'))}</dl></div></details><details class="developer-group"><summary>Order, fulfillment, and delivery <span>Separate lifecycle records</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Order state', order.status || 'Not started')}${detailValue('Order reference', order.reference || 'Not available')}${detailValue('Fulfillment state', fulfillment.status || 'Not started')}${detailValue('Fulfillment reference', fulfillment.reference || 'Not available')}${detailValue('Delivery state', delivery.status || 'Not started')}${detailValue('Delivery reference', delivery.reference || 'Not available')}${detailValue('Tracking reference', delivery.trackingReference || 'Not available')}${detailValue('Receipt state', receipt.status || 'Not issued')}${detailValue('Receipt reference', receipt.id || 'Not available')}</dl></div></details><details class="developer-group"><summary>Reliability, reconciliation, and activity <span>Replay-safe records</span></summary><div class="developer-content"><dl class="detail-list">${detailValue('Run state', task.state)}${detailValue('Next action', projection.nextAction || 'None')}${detailValue('Payment reconciliation', reconciliation ? 'Required' : 'Not required')}${detailValue('Automatic retry', reconciliation ? 'Disabled' : 'Not used')}${detailValue('Idempotency / replay', 'Server-owned action replay protection')}</dl>${developerOperationDetails(projection)}${developerActivityDetails(projection)}<details class="developer-subdetails"><summary>Safe references</summary><dl class="detail-list">${safeRefs}</dl></details></div></details>${developerAgentDetails(projection)}</section>`;
 }
 
 function fundingPanel() {
@@ -657,7 +710,7 @@ function virtualCardDrawer(task) {
   const balance = Number.isFinite(financial.finalBalanceMinor) ? formatMoney(financial.finalBalanceMinor, currency) : Number.isFinite(financial.balanceBeforeMinor) ? formatMoney(financial.balanceBeforeMinor, currency) : 'Not available';
   const paymentStatus = paymentOutcome(task);
   const safeReference = card?.maskedReference || payment.reference || 'Not available';
-  return `<div class="drawer-backdrop" data-close-drawer><aside class="virtual-card-drawer" role="dialog" aria-modal="true" aria-labelledby="virtual-card-title" data-stop-drawer><div class="drawer-heading"><div><span class="overline">Payment</span><h2 id="virtual-card-title">Payment summary</h2></div><button type="button" class="close-button" data-close-drawer aria-label="Close payment summary">✕</button></div><div class="drawer-payment-amount"><span class="data-label">Amount</span><strong>${escapeHtml(task ? formatMoney(payment.amountMinor || taskQuote(task).totalMinor, currency) : 'Not started')}</strong><small>For this purchase only</small></div><div class="drawer-facts">${dataCell('Payment status', statusLabels[paymentStatus] || 'Not started', payment.status === 'unknown' ? 'Needs your confirmation' : 'Purchase payment')}${dataCell('Payment method', card ? 'One-use payment method' : 'Not available', 'Credentials are never shown')}${dataCell('Safe reference', shortId(safeReference), 'Safe reference only')}</div>${Number.isFinite(financial.finalBalanceMinor) ? `<div class="drawer-balance"><span class="data-label">Task-scoped demo balance</span><strong>${escapeHtml(balance)}</strong><small>This task snapshot only - never the global wallet balance</small></div>` : ''}<p class="drawer-disclosure">Simulation only. Payment details are simulated. No real money, order, or delivery is used.</p></aside></div>`;
+  return `<div class="drawer-backdrop" data-close-drawer><aside class="virtual-card-drawer" role="dialog" aria-modal="true" aria-labelledby="virtual-card-title" aria-describedby="payment-drawer-disclosure" tabindex="-1" data-stop-drawer><div class="drawer-heading"><div><span class="overline">Payment</span><h2 id="virtual-card-title">Payment summary</h2></div><button type="button" class="close-button" data-close-drawer aria-label="Close payment summary">✕</button></div><div class="drawer-payment-amount"><span class="data-label">Amount</span><strong>${escapeHtml(task ? formatMoney(payment.amountMinor || taskQuote(task).totalMinor, currency) : 'Not started')}</strong><small>For this purchase only</small></div><div class="drawer-facts">${dataCell('Payment status', statusLabels[paymentStatus] || 'Not started', payment.status === 'unknown' ? 'Needs your confirmation' : 'Purchase payment')}${dataCell('Payment method', card ? 'One-use payment method' : 'Not available', 'Credentials are never shown')}${dataCell('Safe reference', shortId(safeReference), 'Safe reference only')}</div>${Number.isFinite(financial.finalBalanceMinor) ? `<div class="drawer-balance"><span class="data-label">Task-scoped demo balance</span><strong>${escapeHtml(balance)}</strong><small>This task snapshot only - never the global wallet balance</small></div>` : ''}<p id="payment-drawer-disclosure" class="drawer-disclosure">Simulation only. Payment details are simulated. No real money, order, or delivery is used.</p></aside></div>`;
 }
 
 function agentDisclosure(task) {
@@ -678,7 +731,7 @@ function runView(task) {
   const orderCard = hasReceipt ? receiptPanel(task) : attemptedPurchasePanel(task);
   const evidence = isDeveloperMode() ? developerEvidence(task) : advancedDetails(task);
   const developerPanel = isDeveloperMode() ? developerResourcesPanel() : '';
-  return `<section class="run-view"><div class="run-heading"><div><span class="overline">Purchase status</span><h1>${escapeHtml(taskRequest(task))}</h1></div><div class="run-actions">${modeBadge(isDeveloperMode() ? 'Developer view' : 'Customer view')}<button type="button" class="quiet-dark-button" data-new-purchase>New purchase</button></div></div>${outcome(task)}${orderCard}${stagePanel}${taskFacts(task)}${developerPanel}${evidence}${historyDetails()}</section>`;
+  return `<section class="run-view"><div class="run-heading"><div><span class="overline">Purchase status</span><h1>${escapeHtml(taskRequest(task))}</h1></div><div class="run-actions">${modeBadge(isDeveloperMode() ? 'Developer view' : 'Customer view')}<button type="button" class="quiet-dark-button" data-new-purchase>New purchase</button></div></div>${outcome(task)}${orderCard}${stagePanel}${taskFacts(task)}${evidence}${developerPanel}${historyDetails()}</section>`;
 }
 
 function updateHeader() {
@@ -690,19 +743,34 @@ function updateHeader() {
   controls.querySelectorAll('[data-presentation-mode]').forEach((button) => button.addEventListener('click', () => changePresentationMode(button.dataset.presentationMode)));
 }
 
+function setDrawerIsolation(isOpen) {
+  const background = document.querySelector('#app-content');
+  const topbar = document.querySelector('.topbar');
+  for (const node of [background, topbar]) {
+    if (!node) continue;
+    node.inert = isOpen;
+    if (isOpen) node.setAttribute('aria-hidden', 'true');
+    else node.removeAttribute('aria-hidden');
+  }
+}
+
 function render() {
   app.setAttribute('aria-busy', state.busy ? 'true' : 'false');
+  document.body.classList.toggle('drawer-open', state.drawerOpen);
   updateHeader();
   let content;
   if (!state.task && state.busy) content = `${requestCard()}${isDeveloperMode() ? developerResourcesPanel() : ''}${pendingRun()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
   else if (!state.task) content = `${requestCard()}${isDeveloperMode() ? developerResourcesPanel() : ''}${emptyState()}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
   else content = `${runView(state.task)}${state.error ? `<div class="error-banner" role="alert">${escapeHtml(state.error.message)}</div>` : ''}`;
-  app.innerHTML = content;
+  app.innerHTML = `<div id="app-content">${content}</div>`;
   bindEvents();
   if (state.drawerOpen) {
     app.insertAdjacentHTML('beforeend', virtualCardDrawer(state.task));
+    setDrawerIsolation(true);
     bindDrawerEvents();
     document.querySelector('.virtual-card-drawer .close-button')?.focus?.({ preventScroll: true });
+  } else {
+    setDrawerIsolation(false);
   }
 }
 
@@ -1093,10 +1161,12 @@ function showNewPurchase() {
 }
 
 function closeDrawer() {
+  const previousTrigger = state.drawerTrigger;
   state.drawerOpen = false;
   state.drawerTrigger = null;
   render();
-  document.querySelector('[data-open-drawer]')?.focus?.({ preventScroll: true });
+  const opener = document.querySelector('[data-open-drawer]') || previousTrigger;
+  opener?.focus?.({ preventScroll: true });
 }
 
 function bindDrawerEvents() {
@@ -1151,7 +1221,33 @@ function bindEvents() {
 }
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && state.drawerOpen) closeDrawer();
+  if (!state.drawerOpen) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeDrawer();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const drawer = document.querySelector('.virtual-card-drawer');
+  if (!drawer) return;
+  const focusable = [...drawer.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')].filter((node) => node.offsetParent !== null);
+  if (!focusable.length) {
+    event.preventDefault();
+    drawer.focus({ preventScroll: true });
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!drawer.contains(document.activeElement)) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
 });
 
 async function boot() {
