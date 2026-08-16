@@ -73,5 +73,11 @@ test('acceptance track: market research implementation keeps the canonical lifec
   assert.doesNotMatch(run, /purchaseSummary|orderStatus|What happens next/);
   assert.match(frontend, /customerOutcome/);
   assert.match(frontend, /nextActions/);
+  assert.match(frontend, /purchaseContract/);
+  assert.match(frontend, /customerQuoteFreshness/);
+  assert.match(frontend, /deliveryDetails/);
+  assert.match(frontend, /developerReviewerSummary/);
   assert.match(styles, /stage-tracker \{ grid-template-columns: repeat\(4/);
+  assert.match(styles, /developer-reviewer-summary/);
+  assert.match(styles, /purchase-contract/);
 });

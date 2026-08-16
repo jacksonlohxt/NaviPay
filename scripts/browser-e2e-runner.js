@@ -101,6 +101,8 @@ async function main() {
   waitForText(/What should we buy/);
 
   let text = pageText();
+  assert.match(runChrome(['network']), /127\.0\.0\.1/);
+  assert.doesNotMatch(runChrome(['network']), /https?:\/\/(?!127\.0\.0\.1)/, 'local browser proof must not load external assets');
   assert.match(text, /What should we buy/);
   assert.match(text, /One instruction/);
   assert.match(text, /Optional product evidence/);
@@ -123,6 +125,9 @@ async function main() {
   assert.match(text, /Logitech MX Master 3S/);
   assert.match(text, /Harbor Supply/);
   assert.match(text, /XSGD 121\.50/);
+  assert.match(text, /I understood/i);
+  assert.match(text, /Why this item/i);
+  assert.match(text, /Price checked and still fresh/);
   assert.match(text, /Confirmed/);
   assert.match(text, /Delivered/);
   assert.match(text, /Receipt/i);
@@ -142,6 +147,10 @@ async function main() {
   // The explicit developer view reveals safe server-owned evidence for the same run.
   runChrome(['eval', '() => { document.querySelector("[data-presentation-mode=developer]").click(); return "developer-selected"; }']);
   text = waitForText(/Developer evidence/);
+  assert.match(text, /Outcome first/i);
+  assert.match(text, /Funding · Discovery · Issuance · Execution/);
+  assert.match(runChrome(['eval', '() => JSON.stringify({groups: [...document.querySelectorAll(".developer-evidence > .developer-group")].map(group => group.open), evidenceBeforeControls: Boolean(document.querySelector(".developer-evidence")?.compareDocumentPosition(document.querySelector(".developer-resources-panel")) & Node.DOCUMENT_POSITION_FOLLOWING)})']), /groups.*false.*evidenceBeforeControls.*true/);
+  runChrome(['eval', '() => { document.querySelectorAll(".developer-evidence .developer-group").forEach(group => { group.open = true; }); return "evidence-opened"; }']);
   for (const evidence of ['Interpreted request', 'Quote ID', 'KYC', 'issuer', 'Order, fulfillment, and delivery', 'reconciliation', 'recorded replay']) {
     assert.match(runChrome(['eval', `() => document.querySelector(".developer-evidence")?.innerText.includes(${JSON.stringify(evidence)})`]), /true/, `developer evidence missing: ${evidence}`);
   }
@@ -222,7 +231,7 @@ async function main() {
   assert.doesNotMatch(text, /Item is out of stock/);
 
   // The payment drawer is secondary, human-facing, safe, and keyboard dismissible.
-  runChrome(['eval', '() => { window.fetch = window.__navipayFetch || window.fetch; document.querySelector("[data-open-drawer]").click(); return "drawer-open"; }']);
+  runChrome(['eval', '() => { window.fetch = window.__navipayFetch || window.fetch; const opener = document.querySelector("[data-open-drawer]"); opener.focus(); opener.click(); return "drawer-open"; }']);
   text = pageText();
   assert.match(text, /Payment summary/);
   assert.match(text, /Payment status/i);
@@ -233,7 +242,13 @@ async function main() {
   assert.match(text, /This task snapshot only - never the global wallet balance/i);
   assert.doesNotMatch(text, /Card outcome|Virtual card outcome|Refund payment|Reverse payment/);
   assert.doesNotMatch(text, /PAN|CVV|rawProviderPayload|secret/i);
+  assert.match(runChrome(['eval', '() => JSON.stringify({backgroundInert: document.querySelector("#app-content")?.inert && document.querySelector(".topbar")?.inert, bodyLocked: document.body.classList.contains("drawer-open")})']), /backgroundInert.*true/);
+  for (let index = 0; index < 3; index += 1) {
+    runChrome(['press', 'Tab']);
+    assert.match(runChrome(['eval', '() => String(Boolean(document.querySelector("[role=dialog]")?.contains(document.activeElement)))']), /true/, 'drawer focus escaped its dialog');
+  }
   runChrome(['press', 'Escape']);
+  assert.match(runChrome(['eval', '() => JSON.stringify({drawer: Boolean(document.querySelector("[role=dialog]")), restored: document.activeElement?.matches("[data-open-drawer]")})']), /restored.*true/);
 
   // A narrow viewport keeps the purchase contract readable without horizontal overflow.
   runChrome(['resize', '390', '844']);
@@ -286,6 +301,12 @@ async function main() {
   assert.match(text, /Confirmed/);
   assert.match(text, /Purchase confirmed/);
   assert.match(text, /Needs attention/);
+  assert.match(text, /Simulated local delivery/);
+  runChrome(['eval', '() => { document.querySelector(".delivery-details summary")?.click(); return "delivery-details-open"; }']);
+  text = pageText();
+  assert.match(text, /No external carrier/);
+  runChrome(['eval', '() => { const details = document.querySelector(".delivery-details"); if (details) details.open = false; return "delivery-details-closed"; }']);
+  text = pageText();
   assert.doesNotMatch(text, /Purchase steps|Purchase progress|What happens next|Your purchase|View receipt/i);
   assertDefaultSurface(text, 'delivery failure');
 
@@ -302,10 +323,19 @@ async function main() {
     runChrome(['open', baseUrl]);
     text = pageText();
     assert.match(text, expected, label);
-    assert.match(text, /No purchase record|Purchase details/i, label);
+    assert.match(text, /No purchase record|Purchase details|Choose an item/i, label);
     assert.match(text, /No order|No confirmed order/, label);
+    if (label === 'ambiguity') {
+      assert.match(text, /Several local items match|Compare before continuing/i, `${label}: comparison heading is missing`);
+      assert.match(text, /Select for purchase/i, `${label}: candidate selection is missing`);
+      assert.match(text, /Nothing is reserved or paid until you choose/i, `${label}: pre-selection side-effect guard is missing`);
+    }
     assert.match(text, /No receipt/, label);
     assert.doesNotMatch(text, /Your purchase|What happens next|ORDER STATUS|Purchase progress/, label);
+    if (label === 'insufficient funds') {
+      assert.match(text, /(?:Developer view.*simulated funds.*new purchase|simulated funds.*Developer view.*new purchase)/i, `${label}: recovery handoff is missing`);
+      assert.match(text, /will not retry automatically/i, `${label}: recovery must not retry the failed task`);
+    }
     assertDefaultSurface(text, label);
   }
 
@@ -353,8 +383,9 @@ async function main() {
     runChrome(['open', baseUrl]);
     text = pageText();
     assert.match(text, kind === 'refund' ? /Payment refunded/ : /Payment reversed/);
-    assert.match(text, /immutable original purchase record/);
-    assert.match(text, /CURRENT PAYMENT UPDATE/i);
+    assert.match(text, /Original purchase/);
+    assert.match(text, /original purchase above is unchanged/i);
+    assert.match(text, /CURRENT PAYMENT ADJUSTMENT/i);
     assert.match(text, /XSGD 0\.00/);
     assert.doesNotMatch(text, /Purchase steps|Your purchase|View receipt/i);
     assertDefaultSurface(text, `${kind} payment`);
